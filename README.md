@@ -118,7 +118,12 @@ voided manufacturer warranty. Proceed at your own risk.
 
 The patch scripts and glue code in this repo are licensed under the
 [GNU GPLv3](LICENSE). `nam_core/` is MIT-licensed by its own upstream
-project (Steven Atkinson).
+project (Steven Atkinson). Everything else statically linked, vendored, or
+(on Windows only) redistributed as a DLL -- Eigen, miniz, Nuklear, sha1,
+SDL2, curl, xz, OpenSSL, 7-Zip, etc. -- is under its own permissive
+license; full texts and per-release-artifact scope are in
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md), which ships inside
+every release download too.
 
 This project reverse-engineers and modifies HeadRush Pedalboard, MX5, and
 Gigboard firmware, which is not affiliated with or endorsed by inMusic/HeadRush.

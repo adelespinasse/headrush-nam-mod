@@ -112,7 +112,8 @@ jobs:
       - name: Package (tar.gz, preserves exec bit)
         run: |
           chmod +x build/headrush-nam-gui-linux
-          tar -czf build/headrush-nam-gui-linux.tar.gz -C build headrush-nam-gui-linux
+          cp THIRD_PARTY_LICENSES.md build/
+          tar -czf build/headrush-nam-gui-linux.tar.gz -C build headrush-nam-gui-linux THIRD_PARTY_LICENSES.md
 
       - uses: actions/upload-artifact@v4
         with:
@@ -211,7 +212,8 @@ jobs:
       - name: Package (tar.gz, preserves exec bit)
         run: |
           chmod +x build-arm64/headrush-nam-gui-macos
-          tar -czf build-arm64/headrush-nam-gui-macos.tar.gz -C build-arm64 headrush-nam-gui-macos
+          cp THIRD_PARTY_LICENSES.md build-arm64/
+          tar -czf build-arm64/headrush-nam-gui-macos.tar.gz -C build-arm64 headrush-nam-gui-macos THIRD_PARTY_LICENSES.md
 
       - uses: actions/upload-artifact@v4
         with:
@@ -320,6 +322,22 @@ jobs:
             exit 1
           fi
           cp "$SEVENZIP_DIR/7z.exe" "$SEVENZIP_DIR/7z.dll" build/dist/
+          # Ship 7-Zip's own License.txt verbatim alongside it, on top of
+          # (not instead of) THIRD_PARTY_LICENSES.md's summary below --
+          # this is the authoritative copy of the LGPL 2.1 + unRAR
+          # restriction terms for 7z.exe/7z.dll.
+          if [ -f "$SEVENZIP_DIR/License.txt" ]; then
+            cp "$SEVENZIP_DIR/License.txt" build/dist/7-Zip-License.txt
+          else
+            echo "warning: $SEVENZIP_DIR/License.txt not found, skipping" >&2
+          fi
+
+      # Every runtime dependency bundled above (curl, SDL2, xz, mingw
+      # winpthreads, OpenSSL, 7-Zip) carries its own license terms and
+      # attribution requirements -- see THIRD_PARTY_LICENSES.md for why
+      # each one is here and its full license text.
+      - name: Bundle third-party license notices
+        run: cp THIRD_PARTY_LICENSES.md build/dist/
 
       - name: Zip Windows dist
         run: |
