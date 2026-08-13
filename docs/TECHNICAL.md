@@ -14,16 +14,13 @@ auto-detect fails loudly rather than producing a bad image.
 The MX5 and Gigboard ports reuse everything structural (same RK3288 armv7
 hard-float non-PIE `Evil`, same FIT/ext2/launcher layout, same Anxiety OD v1
 sacrificial pedal); only the absolute addresses differ, re-derived from each
-`Evil` the way `patch/patch_gonkulator.py`'s docstring documents. One thing is
-not ported to either: the on-screen knob relabel — the MX5's and Gigboard's
-labels come from a shared string pool, not a per-pedal QML blob, so on the
-MX5 and Gigboard the knobs keep their **Drive / Tone / Level** names while
-doing model-select / input-trim / output-trim.
+`Evil` the way `patch/patch_gonkulator.py`'s docstring documents. On-screen
+knob labels stay stock **Drive / Tone / Level** on all three devices.
 
 ## Knob implementation
 
-Anxiety OD's on-screen labels are patched (on the **Pedalboard** only — the
-MX5 and Gigboard keep their stock labels) to match what they now do:
+Anxiety OD's on-screen labels stay stock (**Drive / Tone / Level**) on every
+device, but do this instead:
 
 | Original | Function |
 |---|---|
@@ -108,12 +105,14 @@ deadline -- same mechanism as
 
 ## What didn't make it in
 
-- The knob-label QML patch shipped once already (see `git log`) with a
-  version that had **zero effect on real hardware** — it patched the wrong
-  QML unit by proximity-guessing. The current `patch/patch_qml_labels.py` /
-  `core/qml_patch.c` target the exact, uniquely-identified source blob
-  instead and are confirmed correct by offset/length checks, but haven't
-  yet been re-confirmed on real hardware since the fix.
+- The knob-label QML patch has shipped twice (see `git log`) and **neither
+  version takes effect on real hardware**. The first patched the wrong QML
+  unit by proximity-guessing. The current `patch/patch_qml_labels.py` /
+  `core/qml_patch.c` target the exact, uniquely-identified source blob and
+  are byte-correct by offset/length checks, but real-hardware testing
+  (2026-08-13) confirmed on-screen labels still stay stock **Drive / Tone /
+  Level** on Pedalboard. Root cause not yet identified; not shipped or
+  documented as a working feature.
 - A pedal *title* rename (`patch/patch_pedal_title.py`) is written but
   **disabled** — real-hardware testing showed renaming that string breaks
   the pedal entirely (it's very likely used as an internal type-name lookup
@@ -137,10 +136,10 @@ firmware's own UI).
   full derivation of every address used, including the two prior targets
   that were tried and abandoned.
 - `patch/patch_qml_labels.py` — the original Python derivation of the
-  on-screen Drive/Tone/Level knob relabel; superseded for the shipped build
-  by `core/qml_patch.c` (validated byte-identical). Supersedes
-  `patch/patch_knob_labels.py` (kept for history — it shipped once with no
-  real effect; see "What didn't make it in" above).
+  on-screen knob relabel attempt; superseded for the shipped build by
+  `core/qml_patch.c` (validated byte-identical). Supersedes
+  `patch/patch_knob_labels.py`. Neither version's relabel takes effect on
+  real hardware; see "What didn't make it in" above.
 - `patch/patch_pedal_title.py` — **not invoked by the build** — renames the
   pedal's display title; disabled after real-hardware testing broke the
   pedal (see above).
