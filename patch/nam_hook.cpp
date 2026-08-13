@@ -1035,6 +1035,24 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
     }
   }
 
+  // Safety net against a permanent-mute trap: fade_state==3 is only ever
+  // entered alongside a single one-shot switch_model_in_background call (see
+  // the fade_state==1 completion block below). If that ONE call fails to
+  // ever deliver a result -- debounced by kMinSwitchIntervalMs, lost a CAS
+  // race on `switching` to an unrelated overlapping attempt, or the
+  // background thread's try/catch swallowed a load exception (corrupt
+  // config, bad_alloc, unsupported architecture) -- nothing else in this
+  // function ever retries it: the pickup block below only acts once
+  // pending_ready is already true, and the knob-settle branch above only
+  // arms a new transition from fade_state==0, not 3. Without this, the
+  // instance stays muted forever, matching the real-world report of an
+  // instance going silent and never recovering even across NAM-file changes
+  // or new rigs. Mirrors the unconditional per-call retry already used for
+  // the !ready bootstrap case above; switch_model_in_background's own
+  // debounce/CAS guards make calling it every block here cheap and safe.
+  if (s.fade_state.load(std::memory_order_relaxed) == 3 && !s.pending_ready.load(std::memory_order_acquire))
+    switch_model_in_background(s, drive_raw);
+
   // Pick up a finished background load, if any. Only the audio thread ever
   // installs into dsp[] -- see ModelState's own comment. fade_state==3 means
   // the old model already faded all the way out and the background thread
