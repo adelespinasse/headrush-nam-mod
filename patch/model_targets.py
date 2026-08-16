@@ -3,9 +3,10 @@ model_targets.py -- the handful of constants that actually differ between the
 HeadRush `Evil` binaries this build can patch, so one pipeline can target more
 than one model.
 
-Only the values that vary per firmware live here: the two absolute addresses of
-the Anxiety OD (v1) hijack (engine vtable + its real process() function), the
-Update.img `compatible` string for auto-detect, and the QML knob-relabel offsets.
+Only the values that vary per firmware live here: the absolute addresses of
+the Anxiety OD (v1) hijack and the optional Anxiety OD V2 hijack (each a pair
+of engine vtable + its real process() function), the Update.img `compatible`
+string for auto-detect, and the QML knob-relabel offsets.
 Everything else about the hijack is shared across every supported `Evil` and
 lives as a constant in the code that uses it -- the process() vtable slot (8) and
 vaddr->file base (0x8000) in patch_gonkulator.py, and the engine-object field
@@ -38,6 +39,15 @@ class ModelTarget:
                               # process(); also the trampoline fallback AND the
                               # refuse-if-mismatch guard
 
+    # Anxiety OD V2 (internal class name "AnxietyV2") hijack, for the optional
+    # "up to 4 instances" mode -- same PROCESS_SLOT(8)/VADDR_BASE(0x8000) as
+    # v1, own separate engine vtable/slot. On every device RE'd so far, V2's
+    # process() turned out to be the literal same compiled function as v1's
+    # -- v2_orig_process_fn == orig_process_fn by observation, not assumption;
+    # each hijack still independently guards its own vtable slot.
+    v2_engine_vtable_vaddr: int
+    v2_orig_process_fn: int
+
     # patch_qml_labels.py (cosmetic knob relabel); None = skip for this model.
     # list of (file_offset, expected_text, new_text), all same length.
     qml_renames: Optional[List[Tuple[int, str, str]]] = None
@@ -49,6 +59,8 @@ PEDALBOARD_2_7 = ModelTarget(
     match_compatible="inmusic,mg01",
     engine_vtable_vaddr=0x1839044,
     orig_process_fn=0x3260e0,
+    v2_engine_vtable_vaddr=0x18390c0,
+    v2_orig_process_fn=0x3260e0,
     qml_renames=[
         (0x1b7beba, "Drive", "Model"),
         (0x1b7bf1b, "Tone", "Inp "),
@@ -71,6 +83,8 @@ MX5_2_7 = ModelTarget(
     match_compatible="inmusic,hg04",
     engine_vtable_vaddr=0x17ee460,
     orig_process_fn=0x302ed0,
+    v2_engine_vtable_vaddr=0x17ee4dc,
+    v2_orig_process_fn=0x302ed0,
     qml_renames=None,
 )
 
@@ -102,6 +116,8 @@ GIGBOARD_2_7 = ModelTarget(
     match_compatible="inmusic,hg02",
     engine_vtable_vaddr=0x17f2234,
     orig_process_fn=0x302840,
+    v2_engine_vtable_vaddr=0x17f22b0,
+    v2_orig_process_fn=0x302840,
     qml_renames=None,
 )
 

@@ -21,7 +21,12 @@
 //     mechanically, but rejected: user needs Volume's real function, tied
 //     to the expression pedal). Now targets ANXIETY OD (v1) -- see
 //     patch_gonkulator.py for the full derivation -- the user's own choice
-//     of a pedal they're fine sacrificing board-wide. ABI:
+//     of a pedal they're fine sacrificing board-wide. In the optional
+//     "up to 4 instances" build, the SAME hook function is also wired to
+//     Anxiety OD V2's separate engine vtable (own hijack, own hook_slot,
+//     own env var -- see nam_preload.cpp) -- it dispatches per-instance by
+//     engine-object pointer (state_for()) regardless of which pedal class
+//     called in, so no V2-specific code exists here at all. ABI:
 //       void process(EngineObj* this, uint32_t param2, float** input,
 //                     uint32_t numChannels, float** output, int32_t numFrames,
 //                     uint32_t* flags, void* ctx)
@@ -274,7 +279,7 @@ struct CachedModel
 // Calibration result cache, indexed the same way as g_cached_models (one
 // entry per cached model, sized once preload finishes). Kept separate from
 // CachedModel itself since std::atomic isn't movable and g_cached_models is
-// move-assigned as a whole when preload finishes. -1.0 = "not yet
+// move-assigned as a whole when preload finishes. ratio<0.0 = "not yet
 // calibrated for this model". Real hardware showed glitches/occasional
 // full-device reboots when repeatedly switching models -- every switch was
 // redoing the full quality-tier benchmark from scratch (which itself
@@ -284,8 +289,33 @@ struct CachedModel
 // cost; switching back to an already-seen model is instant. A plain mutex
 // is fine here (calibration is rare -- once per distinct model ever
 // selected -- never on the real-time audio path).
-std::vector<double> g_calibration_cache;
+//
+// `epoch` records which g_topology_epoch generation a cached ratio was
+// computed against. A ratio computed when only 2 instances shared the
+// board's CPU budget is too generous once a 3rd/4th instance joins and the
+// per-instance share shrinks -- see g_topology_epoch's own comment. Tagging
+// each cache entry with the epoch it was computed under (instead of
+// clearing the whole cache on every topology change, which would need a
+// mutex lock from the audio thread) means the existing cache-miss path
+// below transparently recomputes the FIRST time -- for any reason, a live
+// switch or a topology-triggered forced reload -- any model is touched
+// after the epoch it was cached under goes stale.
+struct CalibrationEntry
+{
+  double ratio = -1.0;
+  int epoch = -1;
+};
+std::vector<CalibrationEntry> g_calibration_cache;
 std::mutex g_calibration_cache_mutex;
+
+// Bumped every time state_for() claims a brand-new instance slot (i.e. a
+// pedal instance calls in for the very first time this boot) -- see
+// count_claimed_instances()/calibrate_slimmable_quality() for why the
+// shared per-block CPU budget shrinks every time another instance joins.
+// Lock-free (plain atomic increment, no mutex) so bumping it from the audio
+// thread (state_for() runs there) never risks blocking on a background
+// thread holding g_calibration_cache_mutex.
+std::atomic<int> g_topology_epoch{0};
 
 std::vector<CachedModel> g_cached_models;
 std::atomic<bool> g_models_ready{false};
@@ -351,7 +381,7 @@ void preload_models_in_background()
     std::sort(found.begin(), found.end(),
               [](const CachedModel& a, const CachedModel& b) { return a.display_name < b.display_name; });
 
-    g_calibration_cache.assign(found.size(), -1.0);
+    g_calibration_cache.assign(found.size(), CalibrationEntry{});
     g_cached_models = std::move(found);
     g_models_ready.store(true, std::memory_order_release);
   });
@@ -431,6 +461,27 @@ struct ModelState
   std::atomic<int> fade_state{0};
   int32_t fade_progress = 0;
 
+  // Topology epoch (see g_topology_epoch) this instance last completed a
+  // load/reload under. Compared against the live g_topology_epoch in
+  // nam_process_gonk's steady-state path; a mismatch means another
+  // instance has joined the board since, shrinking everyone's shared
+  // per-block budget, so this instance is forced through the same duck-
+  // and-reload cycle a knob-driven switch uses to recalibrate its quality
+  // tier. Only ever written by the audio thread (at install time), so
+  // relaxed load/store would suffice, but kept acquire/release to match
+  // the rest of this struct's cross-thread-visible fields.
+  std::atomic<int> calibrated_epoch{-1};
+  // Set (audio-thread-only, no atomic needed -- same thread that reads it)
+  // when the CURRENT fade-out/reload cycle was armed by a topology-epoch
+  // staleness check rather than a genuine knob-driven model change. Bypasses
+  // the "knob settled back on the same model, no background work needed"
+  // shortcut so the cycle actually reaches switch_model_in_background and
+  // recalculates the quality tier. Cleared only once the reload is actually
+  // installed (not merely attempted), so the existing fade_state==3 retry
+  // safety-net still re-requests a forced reload if the first attempt was
+  // lost (debounced / lost the `switching` CAS).
+  bool force_recalibrate = false;
+
   // Which engine object (this_) this slot belongs to -- see state_for().
   std::atomic<void*> owner_this{nullptr};
 };
@@ -474,7 +525,14 @@ ModelState& state_for(void* this_)
   {
     void* expected = nullptr;
     if (inst.owner_this.compare_exchange_strong(expected, this_, std::memory_order_acq_rel))
+    {
+      // A brand-new instance just joined the shared per-block CPU budget --
+      // see g_topology_epoch's own comment. Lock-free increment only; the
+      // per-model cache itself is left alone here (no mutex from the audio
+      // thread) and instead goes stale lazily, tagged by epoch.
+      g_topology_epoch.fetch_add(1, std::memory_order_release);
       return inst;
+    }
   }
   return g_instances[kMaxInstances - 1]; // all slots claimed -- degrade, don't crash
 }
@@ -640,7 +698,14 @@ double calibrate_slimmable_quality(nam::DSP& dsp, nam::SlimmableModel& slimmable
 // re-constructs a nam::DSP from the already-in-memory cached JSON (see
 // g_cached_models) and atomically swaps it in. Touches no filesystem at
 // all -- only runs on a detached worker thread regardless.
-void switch_model_in_background(ModelState& s, float raw)
+//
+// `force_reload_same_model`: bypasses the "knob landed back on the model
+// already active -- nothing to do" early-return below, for a topology-
+// triggered retroactive recalibration (see ModelState::force_recalibrate)
+// that deliberately wants to reconstruct the SAME model, so its quality
+// tier gets recomputed against the (now smaller) per-instance budget --
+// see calibrate_slimmable_quality/g_topology_epoch.
+void switch_model_in_background(ModelState& s, float raw, bool force_reload_same_model = false)
 {
   const int64_t now = now_ms();
   const int64_t last = s.last_switch_attempt_ms.load(std::memory_order_relaxed);
@@ -671,7 +736,7 @@ void switch_model_in_background(ModelState& s, float raw)
     return; // a switch is already in flight; the next process() call that
             // still sees a changed value will retry once this one finishes
 
-  spawn_detached([&s, raw]() {
+  spawn_detached([&s, raw, force_reload_same_model]() {
     // Everything in this thread body runs inside this try/catch, on purpose:
     // an exception escaping a detached thread's entry function calls
     // std::terminate() *without* unwinding (the Reset guard below would never
@@ -688,8 +753,9 @@ void switch_model_in_background(ModelState& s, float raw)
       } reset{s.switching};
 
       const int idx = knob_value_to_index(raw, static_cast<int>(g_cached_models.size()));
-      if (idx == -2 || idx == s.active_index.load(std::memory_order_acquire))
+      if (idx == -2 || (idx == s.active_index.load(std::memory_order_acquire) && !force_reload_same_model))
         return; // no files found at all, or knob moved but landed back on the same state
+                // (unless a forced recalibration deliberately wants this same model rebuilt)
 
       if (idx == -1)
       {
@@ -742,12 +808,18 @@ void switch_model_in_background(ModelState& s, float raw)
           if (i == 0)
           {
             std::lock_guard<std::mutex> lock(g_calibration_cache_mutex);
-            double& cached = g_calibration_cache[static_cast<size_t>(idx)];
-            if (cached < 0.0)
-              cached = calibrate_slimmable_quality(*d, *slimmable);
+            auto& entry = g_calibration_cache[static_cast<size_t>(idx)];
+            const int live_epoch = g_topology_epoch.load(std::memory_order_acquire);
+            // Stale-by-epoch counts as a miss too, not just never-calibrated
+            // -- see CalibrationEntry's own comment.
+            if (entry.ratio < 0.0 || entry.epoch != live_epoch)
+            {
+              entry.ratio = calibrate_slimmable_quality(*d, *slimmable);
+              entry.epoch = live_epoch;
+            }
             else
-              slimmable->SetSlimmableSize(cached);
-            chosen_ratio = cached;
+              slimmable->SetSlimmableSize(entry.ratio);
+            chosen_ratio = entry.ratio;
           }
           else
             slimmable->SetSlimmableSize(chosen_ratio);
@@ -995,7 +1067,7 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
     // drive_raw never differs from the value already stored as `prev` --
     // permanently stuck dry-passthrough. Retrying unconditionally instead
     // means the very next call after preload finishes picks it up.
-    switch_model_in_background(s, drive_raw);
+    switch_model_in_background(s, drive_raw, s.force_recalibrate);
   }
   else
   {
@@ -1033,6 +1105,26 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
         s.fade_progress = 0;
       }
     }
+
+    // Retroactive quality recalibration: the shared per-instance CPU budget
+    // only shrinks when a NEW instance joins the board (see
+    // g_topology_epoch) -- nothing above notices that an already-playing,
+    // already-steady instance's quality tier was chosen for a larger, now
+    // stale budget. If this instance is steady (fade_state==0, nothing
+    // already in flight -- including whatever the knob-settle check above
+    // may have just armed this same call) and has a real model loaded,
+    // force it through the exact same duck-out/reload/duck-in cycle a
+    // knob-driven switch uses, just re-targeting its OWN current model --
+    // switch_model_in_background's epoch-tagged cache check (see
+    // CalibrationEntry) then recalculates its tier against the new,
+    // smaller budget instead of reusing the stale cached one.
+    if (s.fade_state.load(std::memory_order_relaxed) == 0 && s.active_index.load(std::memory_order_acquire) >= 0
+        && s.calibrated_epoch.load(std::memory_order_acquire) != g_topology_epoch.load(std::memory_order_acquire))
+    {
+      s.force_recalibrate = true;
+      s.fade_state.store(1, std::memory_order_relaxed);
+      s.fade_progress = 0;
+    }
   }
 
   // Safety net against a permanent-mute trap: fade_state==3 is only ever
@@ -1051,7 +1143,7 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
   // the !ready bootstrap case above; switch_model_in_background's own
   // debounce/CAS guards make calling it every block here cheap and safe.
   if (s.fade_state.load(std::memory_order_relaxed) == 3 && !s.pending_ready.load(std::memory_order_acquire))
-    switch_model_in_background(s, drive_raw);
+    switch_model_in_background(s, drive_raw, s.force_recalibrate);
 
   // Pick up a finished background load, if any. Only the audio thread ever
   // installs into dsp[] -- see ModelState's own comment. fade_state==3 means
@@ -1076,7 +1168,7 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
       for (int i = 0; i < kMaxChannels; ++i)
         s.pending_dsp[i].reset();
       s.pending_ready.store(false, std::memory_order_release);
-      switch_model_in_background(s, drive_raw);
+      switch_model_in_background(s, drive_raw, s.force_recalibrate);
       // If fs_for_pickup==3 we're already muted -- stay that way until the
       // fresh request above lands here again. If fs_for_pickup==0, nothing
       // audible is playing here either way (see comment above), so no fade
@@ -1092,6 +1184,8 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
       s.pending_ready.store(false, std::memory_order_release);
       s.ready.store(true, std::memory_order_release);
       ready = true;
+      s.calibrated_epoch.store(g_topology_epoch.load(std::memory_order_acquire), std::memory_order_release);
+      s.force_recalibrate = false;
     }
     else // fs_for_pickup == 3, ready == true, not stale -- the only remaining case
     {
@@ -1104,6 +1198,8 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
       s.pending_ready.store(false, std::memory_order_release);
       s.fade_progress = 0;
       s.fade_state.store(s.pending_index < 0 ? 0 : 2, std::memory_order_relaxed);
+      s.calibrated_epoch.store(g_topology_epoch.load(std::memory_order_acquire), std::memory_order_release);
+      s.force_recalibrate = false;
     }
   }
 
@@ -1189,11 +1285,14 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
       // position (it can wander during the 100ms duck) before doing
       // anything else.
       const int current_idx = knob_value_to_index(drive_raw, static_cast<int>(g_cached_models.size()));
-      if (current_idx == s.active_index.load(std::memory_order_acquire))
+      if (current_idx == s.active_index.load(std::memory_order_acquire) && !s.force_recalibrate)
       {
         // Knob settled back on the model we just faded out -- it's still
         // loaded in dsp[] (never touched during the duck), so just fade it
-        // back IN directly. No background work needed at all.
+        // back IN directly. No background work needed at all. (Skipped when
+        // force_recalibrate is set -- a topology-triggered recalibration
+        // deliberately wants this same model rebuilt at a recalculated
+        // quality tier, not just faded back in unchanged.)
         s.fade_state.store(s.active_index.load(std::memory_order_relaxed) < 0 ? 0 : 2,
                             std::memory_order_relaxed);
       }
@@ -1205,7 +1304,7 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
         // for the muted wait, and switch_model_in_background's own guard,
         // which allows starting from fade_state==3.
         s.fade_state.store(3, std::memory_order_relaxed);
-        switch_model_in_background(s, drive_raw);
+        switch_model_in_background(s, drive_raw, s.force_recalibrate);
       }
     }
   }

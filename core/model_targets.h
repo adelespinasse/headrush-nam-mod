@@ -30,6 +30,16 @@ typedef struct
   uint32_t engine_vtable_vaddr;
   uint32_t orig_process_fn;
 
+  /* Anxiety OD V2 (internal class name "AnxietyV2") hijack, for the optional
+   * "up to 4 instances" mode -- see patch/model_targets.py for the
+   * reverse-engineering rationale. Same PROCESS_SLOT(8)/VADDR_BASE(0x8000)
+   * as v1; on every device checked so far, V2's process() turned out to be
+   * the literal same compiled function as v1's, so orig_process_fn and
+   * v2_orig_process_fn are equal by observation, not by assumption -- each
+   * hijack still patches its own, independently-guarded vtable slot. */
+  uint32_t v2_engine_vtable_vaddr;
+  uint32_t v2_orig_process_fn;
+
   int qml_rename_count; /* 0 = no QML relabel for this model */
   QmlRename qml_renames[NAM_MAX_QML_RENAMES];
 } ModelTarget;

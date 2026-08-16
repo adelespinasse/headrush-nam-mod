@@ -14,11 +14,15 @@
 // CURRENT (additive) design: NAM_HOOK_SLOT_NAML_ADDR -> nam_process_naml,
 // NAM_HOOK_SLOT_NAML_TRIM_IN_ADDR -> nam_set_input_trim,
 // NAM_HOOK_SLOT_NAML_TRIM_OUT_ADDR -> nam_set_output_trim (all three from
-// patch_namloader.py's injected segment). SUPERSEDED designs, kept only as
-// reference/fallback: NAM_HOOK_SLOT_GONK_ADDR -> nam_process_gonk (Gonkulator
-// hijack -- overwrites the REAL Gonkulator pedal's process() everywhere,
-// rejected by the user as a final design) and NAM_HOOK_SLOT_ADDR ->
-// nam_process (IRLoader hook -- overwrites real .wav IR loading everywhere).
+// patch_namloader.py's injected segment). Current SHIPPING design:
+// NAM_HOOK_SLOT_GONK_ADDR -> nam_process_gonk (Anxiety OD v1 hijack) and,
+// in the optional "up to 4 instances" build, NAM_HOOK_SLOT_GONK_V2_ADDR ->
+// the SAME nam_process_gonk (Anxiety OD V2 hijack -- distinct vtable slot,
+// same hook function, since it dispatches per-instance internally).
+// SUPERSEDED designs, kept only as reference/fallback: the "Gonkulator"
+// name above is historical (see nam_hook.cpp's file header) and
+// NAM_HOOK_SLOT_ADDR -> nam_process (IRLoader hook -- overwrites real .wav
+// IR loading everywhere).
 // Only set a superseded design's env var if you deliberately want that old
 // behavior back; see nam_hook.cpp's file header for why each was rejected.
 
@@ -106,6 +110,13 @@ __attribute__((constructor)) static void install_nam_hooks()
   install_one_hook(lib, "nam_set_input_trim", "NAM_HOOK_SLOT_NAML_TRIM_IN_ADDR");
   install_one_hook(lib, "nam_set_output_trim", "NAM_HOOK_SLOT_NAML_TRIM_OUT_ADDR");
   install_one_hook(lib, "nam_process_gonk", "NAM_HOOK_SLOT_GONK_ADDR");
+  // Anxiety OD V2's hijack, for the optional "up to 4 instances" mode --
+  // same compiled hook function as v1 (nam_process_gonk already dispatches
+  // per-instance by engine-object pointer, see state_for() in nam_hook.cpp,
+  // so it doesn't matter which pedal class' vtable slot called in). Skipped
+  // entirely (see install_one_hook) when the 2-instance build didn't patch
+  // a V2 hook_slot, so this env var is simply unset.
+  install_one_hook(lib, "nam_process_gonk", "NAM_HOOK_SLOT_GONK_V2_ADDR");
   install_one_hook(lib, "nam_process", "NAM_HOOK_SLOT_ADDR");
 
   // The one-time *.nam model preload (nam_hook.cpp's

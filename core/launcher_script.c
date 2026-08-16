@@ -20,8 +20,9 @@ static void set_err(char* err, size_t err_size, const char* fmt, ...)
 #define NAM_MOD_END "# --- end NAM mod ---\n"
 
 static const char* const MOD_DESC =
-  "# Anxiety OD (v1) process() hijack -- the only NAM path this build applies.\n"
-  "# One of its knobs (Drive/Tone/Level) now selects/scans .nam model files.\n"
+  "# Anxiety OD (v1) process() hijack, optionally also Anxiety OD V2's --\n"
+  "# the only NAM path(s) this build applies. One of each hijacked pedal's\n"
+  "# knobs (Drive/Tone/Level) now selects/scans .nam model files.\n"
   "# (The additive, own-pedal-type design in patch_namloader.py is NOT\n"
   "# applied here -- see README.md.)\n";
 
@@ -74,8 +75,8 @@ static bool sb_append_str(StrBuf* sb, const char* s)
   return sb_append(sb, s, strlen(s));
 }
 
-bool nam_build_launcher_script(const char* stock_script_text, const char* hook_slot_addr_hex, char** out, char* err,
-                                size_t err_size)
+bool nam_build_launcher_script(const char* stock_script_text, const char* hook_slot_addr_hex,
+                                const char* hook_slot_v2_addr_hex, char** out, char* err, size_t err_size)
 {
   *out = NULL;
 
@@ -151,6 +152,11 @@ bool nam_build_launcher_script(const char* stock_script_text, const char* hook_s
   ok = ok && sb_append(&final, script.data, (size_t)(hit - script.data));
   ok = ok && sb_append_str(&final, "systemd-inhibit --what=handle-power-key env LD_PRELOAD=/usr/Evil/libnam_preload.so NAM_HOOK_SLOT_GONK_ADDR=");
   ok = ok && sb_append_str(&final, hook_slot_addr_hex);
+  if (hook_slot_v2_addr_hex)
+  {
+    ok = ok && sb_append_str(&final, " NAM_HOOK_SLOT_GONK_V2_ADDR=");
+    ok = ok && sb_append_str(&final, hook_slot_v2_addr_hex);
+  }
   ok = ok && sb_append_str(&final, " /usr/Evil/Evil");
   ok = ok && sb_append_str(&final, hit + strlen(OLD_EXEC));
   free(script.data);

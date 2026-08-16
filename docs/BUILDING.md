@@ -98,8 +98,12 @@ the `blobs/` entry above.
 CLI (local dev/debugging tool only, not built or shipped by CI):
 
 ```sh
-build/gui-core-cli <stock Update.img> <out.img> --model pedalboard
+build/gui-core-cli <stock Update.img> <out.img> --model pedalboard [--instances 2|4]
 ```
+
+`--instances 4` also hijacks Anxiety OD V2 for up to 4 NAM instances total
+(default: `2`, Anxiety OD v1 only) -- see docs/TECHNICAL.md's "Up to 4
+instances" section.
 
 GUI -- can be run from anywhere, not just the repo root:
 

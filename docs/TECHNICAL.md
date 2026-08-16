@@ -6,6 +6,13 @@ and produces a modified one that hijacks the **Anxiety OD (v1)** pedal's
 model is auto-detected from the `Update.img`'s `compatible` string (see
 `core/model_targets.c` / `patch/model_targets.py`).
 
+The GUI/CLI also offer an opt-in **"up to 4 instances"** mode that additionally
+hijacks the separate **Anxiety OD V2** pedal (internal class name
+`AnxietyV2` -- a distinct, separately-instantiable pedal type from v1, each
+addable up to twice on a board) the same way. Both hijacks, when enabled,
+patch the same stock `Evil` binary independently -- see "Up to 4 instances"
+below.
+
 The build refuses to proceed if the selected model's addresses don't match
 the `Evil` binary in the `Update.img` (the Anxiety OD vtable slot must
 already hold the expected `process()` address), so a wrong model / failed
@@ -83,6 +90,38 @@ deadline -- same mechanism as
   not). Lowering niceness costs nothing and gives the kernel every reason
   to always favor the audio thread under contention.
 
+## Up to 4 instances (optional Anxiety OD V2 hijack)
+
+By default the build only hijacks Anxiety OD (v1), which the stock firmware's
+block-add menu allows up to twice per board -- 2 NAM instances max. The GUI's
+"Up to 4 instances" radio option (mirrored by the CLI's `--instances 4`) also
+hijacks **Anxiety OD V2** (internal class `AnxietyV2`), a separate,
+sibling pedal type also addable up to twice, for up to 4 total.
+
+Both hijacks reuse the exact same mechanism (`core/elf_patch.c`'s
+`nam_elf_patch_gonkulator`, called twice against the same in-memory `Evil`
+buffer -- once per class's own engine vtable/`process()` address, see
+`core/model_targets.h`'s `v2_engine_vtable_vaddr`/`v2_orig_process_fn`) and
+the exact same compiled hook function, `nam_process_gonk` -- it already
+dispatches per-instance by engine-object pointer (`state_for()` in
+`patch/nam_hook.cpp`) regardless of which pedal class called in, so no
+V2-specific hook code exists. On every device checked so far, Anxiety OD
+V2's `process()` turned out to be the literal same compiled function as
+v1's -- confirmed by disassembly, not assumed.
+
+**Quality auto-recalibrates board-wide as instances are added.** All
+hijacked instances (v1 and V2 together) share one real-time per-block CPU
+budget. Adding a 3rd or 4th instance shrinks everyone's fair share, so every
+already-playing instance is forced through the same silent duck-out/
+reload/duck-in cycle a knob-driven model switch uses, and picks a new
+quality tier sized to the smaller shared budget -- not just the newly-added
+instance. This is a lazy, self-correcting design (`g_topology_epoch` in
+`nam_hook.cpp`, bumped whenever a new instance is first seen; each
+instance's cached quality tier is tagged with the epoch it was computed
+under, so anything stale gets recalculated the next time it's touched)
+rather than an eager board-wide sweep, to avoid taking any lock from the
+real-time audio thread.
+
 ## Safety details baked into the hook
 
 - **Per-instance state**: if you add Anxiety OD more than once on a board,
@@ -92,8 +131,11 @@ deadline -- same mechanism as
 - **Adaptive quality tiers**: NAM "A2" models expose quality tiers trading
   CPU for fidelity. This benchmarks each model's tiers in the background
   (never the audio thread) and picks the highest one that fits this
-  device's real-time budget — accounting for how many Anxiety OD instances
-  are active at once, since they share one audio-callback deadline.
+  device's real-time budget — accounting for how many hijacked instances
+  (Anxiety OD v1 and, if enabled, V2) are active at once, since they share
+  one audio-callback deadline. Already-playing instances are retroactively
+  recalibrated when a new instance joins and shrinks everyone's share —
+  see "Up to 4 instances" above.
 - **Corrupt-file tolerant**: a `.nam` file with bad JSON or an unsupported
   architecture is silently skipped, not fatal to the others; a file that
   passes JSON parsing but fails to build a real DSP graph is caught too
@@ -146,8 +188,9 @@ firmware's own UI).
 - `patch/trampoline_gonk.S` — the ARM32 trampoline injected at Anxiety OD's
   `process()` vtable slot.
 - `patch/model_targets.py` — per-model/firmware registry of the values that
-  differ per `Evil` (engine vtable + `process()` address, QML label
-  offsets); reimplemented in `core/model_targets.c` for the shipped build.
+  differ per `Evil` (engine vtable + `process()` address for v1 and,
+  optionally, V2; QML label offsets); reimplemented in `core/model_targets.c`
+  for the shipped build.
 - `patch/test_nam_gonk_e2e.c` — standalone e2e test harness for the shipped
   hijack (run under QEMU armv7 user-mode emulation, e.g.
   `docker run --rm --platform linux/arm/v7 -v $PWD:/work -w /work

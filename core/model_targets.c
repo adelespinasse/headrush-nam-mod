@@ -10,6 +10,8 @@ const ModelTarget NAM_MODEL_TARGETS[NAM_MODEL_COUNT] = {
     .match_compatible = "inmusic,mg01",
     .engine_vtable_vaddr = 0x1839044,
     .orig_process_fn = 0x3260e0,
+    .v2_engine_vtable_vaddr = 0x18390c0,
+    .v2_orig_process_fn = 0x3260e0,
     .qml_rename_count = 3,
     .qml_renames =
       {
@@ -25,6 +27,8 @@ const ModelTarget NAM_MODEL_TARGETS[NAM_MODEL_COUNT] = {
     .match_compatible = "inmusic,hg04",
     .engine_vtable_vaddr = 0x17ee460,
     .orig_process_fn = 0x302ed0,
+    .v2_engine_vtable_vaddr = 0x17ee4dc,
+    .v2_orig_process_fn = 0x302ed0,
     .qml_rename_count = 0,
   },
   /* HeadRush Gigboard 2.7 -- confirmed working on real hardware.
@@ -34,6 +38,8 @@ const ModelTarget NAM_MODEL_TARGETS[NAM_MODEL_COUNT] = {
     .match_compatible = "inmusic,hg02",
     .engine_vtable_vaddr = 0x17f2234,
     .orig_process_fn = 0x302840,
+    .v2_engine_vtable_vaddr = 0x17f22b0,
+    .v2_orig_process_fn = 0x302840,
     .qml_rename_count = 0,
   },
 };

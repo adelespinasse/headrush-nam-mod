@@ -119,24 +119,14 @@ bool nam_mac_package_app(const char* extracted_dir, const uint8_t* patched_img_d
     return false;
   }
 
-  char update_img_path[1200];
-  if (!nam_mac_find_update_img(app_dir, update_img_path, sizeof(update_img_path)))
-  {
-    set_err(err, err_size, "no Update.img found inside %s -- HeadRush may have changed the updater layout",
-            app_dir);
-    return false;
-  }
-
-  FILE* f = fopen(update_img_path, "wb");
-  if (!f || (patched_img_len > 0 && fwrite(patched_img_data, 1, patched_img_len, f) != patched_img_len))
-  {
-    if (f)
-      fclose(f);
-    set_err(err, err_size, "writing patched Update.img into %s failed", update_img_path);
-    return false;
-  }
-  fclose(f);
-
+  /* Copy the pristine extracted .app to the output path FIRST, then patch
+   * the COPY's Update.img -- not the other way around. Writing the patched
+   * bytes into app_dir's own Update.img (the original ordering) mutated the
+   * shared extracted_dir tree in place, so any later step that assumes
+   * extracted_dir/app_dir is still genuinely unmodified stock (e.g. main.c's
+   * "keep an unmodified copy alongside the patched one, for recovery" step)
+   * silently copied the ALREADY-PATCHED bytes under a "(stock)" name instead
+   * -- confirmed on disk, see the mislabeled-stock-file finding this fixes. */
   char q_dest[1300], q_app[1300], q_output[1300];
   shell_quote(output_app_path, q_dest, sizeof(q_dest));
   shell_quote(app_dir, q_app, sizeof(q_app));
@@ -149,6 +139,24 @@ bool nam_mac_package_app(const char* extracted_dir, const uint8_t* patched_img_d
     set_err(err, err_size, "copying %s to %s failed", app_dir, output_app_path);
     return false;
   }
+
+  char update_img_path[1200];
+  if (!nam_mac_find_update_img(output_app_path, update_img_path, sizeof(update_img_path)))
+  {
+    set_err(err, err_size, "no Update.img found inside %s -- HeadRush may have changed the updater layout",
+            output_app_path);
+    return false;
+  }
+
+  FILE* f = fopen(update_img_path, "wb");
+  if (!f || (patched_img_len > 0 && fwrite(patched_img_data, 1, patched_img_len, f) != patched_img_len))
+  {
+    if (f)
+      fclose(f);
+    set_err(err, err_size, "writing patched Update.img into %s failed", update_img_path);
+    return false;
+  }
+  fclose(f);
 
   snprintf(cmd, sizeof(cmd), "codesign --force --deep --sign - %s 2>/dev/null", q_output);
   if (system(cmd) != 0)

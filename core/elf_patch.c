@@ -213,8 +213,17 @@ bool nam_elf_patch_gonkulator(uint8_t* data, size_t data_len, const uint8_t tram
 
   uint32_t cave_off = code_file_end;
   uint32_t tramp_base_vaddr = code_seg->p_vaddr + code_seg->p_filesz;
-  uint32_t new_code_filesz = code_seg->p_filesz + gap_size;
-  uint32_t new_code_memsz = code_seg->p_memsz + gap_size;
+  /* Only reclaim the TRAMP_CODE_LEN bytes actually used, not the whole
+   * gap_size -- growing by the full gap (the original single-hijack
+   * behavior) ate every byte of dead space on the FIRST call, leaving
+   * nothing for a second hijack (Anxiety OD V2) to reclaim its own trampoline
+   * from in the same cave. The untouched remainder stays exactly what it
+   * already was in the stock binary: file bytes not covered by any PT_LOAD's
+   * p_filesz/p_memsz -- ordinary inter-segment padding, not read/mapped by
+   * the ELF loader either way, so this changes nothing about how the
+   * binary boots or runs. */
+  uint32_t new_code_filesz = code_seg->p_filesz + TRAMP_CODE_LEN;
+  uint32_t new_code_memsz = code_seg->p_memsz + TRAMP_CODE_LEN;
 
   uint32_t hook_slot_addr = data_seg->p_vaddr + data_seg->p_memsz;
   uint32_t new_data_memsz = data_seg->p_memsz + 4;

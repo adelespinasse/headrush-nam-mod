@@ -20,7 +20,8 @@ confirmed on real hardware — see below.
 
    Without these, `headrush-nam-gui` fails to launch with a
    `Library not loaded` error.
-2. Run it, pick your model (Pedalboard, MX5, or Gigboard), and click **Install NAM
+2. Run it, pick your model (Pedalboard, MX5, or Gigboard), choose **2 instances**
+   or **up to 4 instances** (see "The pedal" below), and click **Install NAM
    Mod** — it downloads the official HeadRush firmware updater and builds a
    patched copy of it in the current directory.
 3. Put your device in firmware-update mode. See
@@ -70,7 +71,14 @@ On the device, add the **Anxiety OD** pedal.
 | **LEVEL** | output trim |
 
 This is a *hijack*: Anxiety OD loses its real overdrive function board-wide,
-on every instance. Anxiety OD **v2** is still available with its original sound.
+on every instance.
+
+**2 instances vs up to 4**: the stock firmware allows up to 2 Anxiety OD
+blocks on a board, so by default that's 2 NAM instances max, and Anxiety OD
+**V2** is left untouched, still available with its original sound. Pick
+**up to 4 instances** in the installer to also hijack Anxiety OD V2 (also
+addable up to twice) the same way, for up to 4 NAM instances total — at the
+cost of losing Anxiety OD V2's real sound board-wide too.
 
 ## Supported models
 

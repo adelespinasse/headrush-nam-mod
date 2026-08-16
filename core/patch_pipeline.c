@@ -90,7 +90,7 @@ static bool write_whole_file(const char* path, const uint8_t* data, size_t len, 
 }
 
 bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, const char* model_name,
-                         const char* workdir, NamProgressFn progress, void* progress_user_data,
+                         bool enable_v2_hijack, const char* workdir, NamProgressFn progress, void* progress_user_data,
                          uint8_t** out_img_data, size_t* out_img_len, char* err, size_t err_size)
 {
   *out_img_data = NULL;
@@ -202,6 +202,18 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
   report(progress, progress_user_data, "OK  ELF hijack patched: trampoline @ 0x%x, hook_slot @ 0x%x",
          elf_result.trampoline_vaddr, elf_result.hook_slot_addr);
 
+  ElfPatchResult elf_result_v2;
+  bool has_v2_hijack = false;
+  if (enable_v2_hijack)
+  {
+    if (!nam_elf_patch_gonkulator(evil_data, evil_len, tramp, target->v2_engine_vtable_vaddr,
+                                   target->v2_orig_process_fn, &elf_result_v2, err, err_size))
+      goto cleanup;
+    has_v2_hijack = true;
+    report(progress, progress_user_data, "OK  ELF hijack patched (Anxiety OD V2): trampoline @ 0x%x, hook_slot @ 0x%x",
+           elf_result_v2.trampoline_vaddr, elf_result_v2.hook_slot_addr);
+  }
+
   if (target->qml_rename_count > 0)
   {
     if (!nam_qml_patch(evil_data, evil_len, target, err, err_size))
@@ -216,7 +228,11 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
 
   char hook_slot_hex[32];
   snprintf(hook_slot_hex, sizeof(hook_slot_hex), "0x%x", elf_result.hook_slot_addr);
-  if (!nam_build_launcher_script(script_data, hook_slot_hex, &new_script, err, err_size))
+  char hook_slot_v2_hex[32];
+  if (has_v2_hijack)
+    snprintf(hook_slot_v2_hex, sizeof(hook_slot_v2_hex), "0x%x", elf_result_v2.hook_slot_addr);
+  if (!nam_build_launcher_script(script_data, hook_slot_hex, has_v2_hijack ? hook_slot_v2_hex : NULL, &new_script,
+                                  err, err_size))
     goto cleanup;
   free(script_data);
   script_data = NULL;

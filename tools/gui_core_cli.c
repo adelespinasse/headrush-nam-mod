@@ -6,7 +6,7 @@
  * by CI, see docs/BUILDING.md.
  *
  * usage: gui-core-cli <stock.img> <out.img> --model pedalboard|mx5|gigboard
- *                      [--keep-work-dir]
+ *                      [--instances 2|4] [--keep-work-dir]
  */
 #include "patch_pipeline.h"
 #include "tempdir.h"
@@ -67,17 +67,29 @@ static void print_progress(const char* message, void* user_data)
 int main(int argc, char** argv)
 {
   if (argc < 3)
-    die("usage: %s <stock.img> <out.img> --model pedalboard|mx5|gigboard [--keep-work-dir]", argv[0]);
+    die("usage: %s <stock.img> <out.img> --model pedalboard|mx5|gigboard [--instances 2|4] [--keep-work-dir]",
+        argv[0]);
 
   const char* input_img = argv[1];
   const char* output_img = argv[2];
   const char* model_name = NULL;
   bool keep_work_dir = false;
+  int instances = 2;
 
   for (int i = 3; i < argc; ++i)
   {
     if (strcmp(argv[i], "--model") == 0 && i + 1 < argc)
       model_name = argv[++i];
+    else if (strcmp(argv[i], "--instances") == 0 && i + 1 < argc)
+    {
+      const char* v = argv[++i];
+      if (strcmp(v, "2") == 0)
+        instances = 2;
+      else if (strcmp(v, "4") == 0)
+        instances = 4;
+      else
+        die("--instances must be 2 or 4, got %s", v);
+    }
     else if (strcmp(argv[i], "--keep-work-dir") == 0)
       keep_work_dir = true;
     else
@@ -99,8 +111,8 @@ int main(int argc, char** argv)
   uint8_t* out_data;
   size_t out_len;
   char err[1024];
-  bool ok = nam_patch_pipeline(input_data, input_len, model_name, workdir, print_progress, NULL, &out_data, &out_len,
-                                err, sizeof(err));
+  bool ok = nam_patch_pipeline(input_data, input_len, model_name, instances == 4, workdir, print_progress, NULL,
+                                &out_data, &out_len, err, sizeof(err));
   free(input_data);
 
   if (!ok)
@@ -119,6 +131,6 @@ int main(int argc, char** argv)
   else
     nam_remove_dir_recursive(workdir);
 
-  printf("\nOK  Anxiety OD (v1) process() NAM hijack applied.\n");
+  printf("\nOK  Anxiety OD (v1)%s process() NAM hijack applied.\n", instances == 4 ? " + Anxiety OD V2" : "");
   return 0;
 }

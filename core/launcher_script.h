@@ -12,11 +12,13 @@
 
 /* `stock_script_text` is the stock /usr/Evil/Scripts/evil launcher script,
  * NUL-terminated. `hook_slot_addr_hex` is the NAM_HOOK_SLOT_GONK_ADDR value
- * as a "0x..."-style string (see ElfPatchResult.hook_slot_addr). *out is
- * malloc'd, NUL-terminated -- caller frees it. Returns false (with a reason
- * in err) if the stock script's expected exec line isn't found exactly
- * once (refuse-on-mismatch, same as the Python original). */
-bool nam_build_launcher_script(const char* stock_script_text, const char* hook_slot_addr_hex, char** out, char* err,
-                                size_t err_size);
+ * as a "0x..."-style string (see ElfPatchResult.hook_slot_addr).
+ * `hook_slot_v2_addr_hex` is the same for the optional Anxiety OD V2 hijack
+ * (NAM_HOOK_SLOT_GONK_V2_ADDR) -- pass NULL to skip it (2-instance mode).
+ * *out is malloc'd, NUL-terminated -- caller frees it. Returns false (with a
+ * reason in err) if the stock script's expected exec line isn't found
+ * exactly once (refuse-on-mismatch, same as the Python original). */
+bool nam_build_launcher_script(const char* stock_script_text, const char* hook_slot_addr_hex,
+                                const char* hook_slot_v2_addr_hex, char** out, char* err, size_t err_size);
 
 #endif

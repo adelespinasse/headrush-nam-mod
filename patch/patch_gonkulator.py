@@ -65,8 +65,14 @@ Reverse-engineered facts (Evil 2.7):
     back to the original 0x3260e0. Unlike the IRLoader trampoline, this one
     uses r12 (ip) as scratch instead of r1, because r1 here is a REAL
     argument (param2), not free scratch space.
-  - AnxietyOD has a V2 sibling too (ModuleEditors/AnxietyODV2 exists), not
-    hijacked here -- only the v1 (mono) vtable is patched.
+  - AnxietyOD has a V2 sibling too (ModuleEditors/AnxietyODV2 exists,
+    internal class name "AnxietyV2"). Optionally ALSO hijacked, for the
+    "up to 4 instances" build -- see core/patch_pipeline.c's enable_v2_hijack
+    and core/model_targets.h's v2_engine_vtable_vaddr/v2_orig_process_fn.
+    This script itself only ever patches ONE vtable (whichever
+    --engine-vtable/--orig-fn it's given); the GUI/CLI pipeline calls the
+    equivalent C function (nam_elf_patch_gonkulator) twice, once per
+    hijacked class, against the same buffer.
 
 DOES NOT add a new PT_LOAD segment or touch e_phoff/e_phnum -- an earlier
 version did (new segment + relocated phdr table), and that specific
@@ -262,8 +268,16 @@ def main():
 
     cave_off = code_seg["p_offset"] + code_seg["p_filesz"]  # == old file end, gap starts here
     tramp_base_vaddr = code_seg["p_vaddr"] + code_seg["p_filesz"]  # == old vaddr end
-    new_code_filesz = code_seg["p_filesz"] + gap_size
-    new_code_memsz = code_seg["p_memsz"] + gap_size
+    # Only reclaim the TRAMP_CODE_LEN bytes actually used, not the whole
+    # gap_size -- growing by the full gap ate every byte of dead space on
+    # the FIRST invocation, leaving nothing for a second hijack (Anxiety OD
+    # V2) to reclaim its own trampoline from in the same cave when this
+    # script is run twice against the same file. The untouched remainder
+    # stays exactly what it already was in the stock binary: file bytes not
+    # covered by any PT_LOAD's p_filesz/p_memsz -- ordinary inter-segment
+    # padding, not read/mapped by the ELF loader either way.
+    new_code_filesz = code_seg["p_filesz"] + TRAMP_CODE_LEN
+    new_code_memsz = code_seg["p_memsz"] + TRAMP_CODE_LEN
 
     # Mutable hook_slot goes right past the data segment's CURRENT memsz end
     # -- exactly where its own .bss already ends, extended by one word. No
