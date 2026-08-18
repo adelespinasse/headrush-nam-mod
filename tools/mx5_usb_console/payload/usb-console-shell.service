@@ -1,0 +1,19 @@
+[Unit]
+Description=Root shell on the USB serial console
+After=usb-console.service
+Wants=usb-console.service
+
+[Service]
+ExecStart=/bin/sh
+StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/ttyGS0
+TTYReset=yes
+TTYVHangup=yes
+Restart=always
+RestartSec=2
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
