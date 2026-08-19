@@ -101,10 +101,18 @@ There is **no SSH server** in the rootfs (no dropbear/sshd; busybox here has
 `inetd`/`login` but not `telnetd`), so SSH would mean adding a static ARM
 `dropbear` binary.
 
-Screen mirroring is a much harder problem: `Evil`'s Qt is built with **eglfs
-only** — there's no VNC platform plugin compiled in — so it would require
-capturing the GPU framebuffer and feeding an external server, on a single core
-already budgeted for real-time audio.
+**Screen mirroring** turned out to be practical after all — see
+`tools/mx5_remote_screen`. Qt has no VNC platform plugin (eglfs only), but the
+`eglfs_mali` backend presents through fbdev, so `/dev/fb0` holds the live
+composited screen and can simply be read. Touch is injected back through
+`/dev/uinput`. It streams over the `ttyGS1` channel this mod provides.
+
+(An earlier version of this file claimed the device had a single core shared with
+real-time audio, echoing a statement in the repo's own docs. That is wrong: the
+RK3288 is quad-core, all four are online, and the firmware pins audio IRQs and
+DSP threads to specific cores. Background work should still stay off the audio
+core — `taskset -c 3` is the free one — but there is far more headroom than that
+claim implies.)
 
 ## Risks and recovery
 
