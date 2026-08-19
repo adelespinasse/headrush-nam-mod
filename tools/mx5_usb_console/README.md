@@ -1,8 +1,14 @@
 # MX5 USB serial console
 
 Adds a **root shell over USB** to HeadRush MX5 firmware 2.7. After flashing, plug
-the MX5 into a computer and it enumerates as a USB serial port; opening that port
-gives a shell on the device.
+the MX5 into a computer and it enumerates as **two** USB serial ports:
+
+| Port | Purpose |
+|---|---|
+| `ttyGS0` (lower COM number) | root shell |
+| `ttyGS1` | free data channel, used by `tools/mx5_remote_screen` |
+
+Opening the first gives a shell on the device.
 
 Confirmed working on real MX5 hardware (appears as a COM port on Windows).
 
@@ -44,7 +50,7 @@ couple of systemd units.
 
 | Path | Purpose |
 |---|---|
-| `/usr/Evil/Scripts/setup-usb-console.sh` | create gadget `g3` with `acm.usb0`, bind the UDC |
+| `/usr/Evil/Scripts/setup-usb-console.sh` | create gadget `g3` with `acm.usb0` + `acm.usb1`, bind the UDC |
 | `/usr/Evil/Scripts/remove-usb-console.sh` | tear it down, releasing the UDC |
 | `/lib/systemd/system/usb-console.service` | run the setup at boot |
 | `/lib/systemd/system/usb-console-shell.service` | `/bin/sh` on `/dev/ttyGS0`, auto-restart |

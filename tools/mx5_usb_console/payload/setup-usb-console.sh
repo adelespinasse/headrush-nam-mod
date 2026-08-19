@@ -1,10 +1,15 @@
 #!/bin/sh
 # USB serial debug console (CDC-ACM gadget).  [added by mod]
 #
-# Creates gadget "g3" with an acm function and binds the UDC, so the device
-# shows up on the host as a USB serial port (/dev/ttyACM0 on Linux/macOS, a
-# COM port on Windows).  A root shell is attached to /dev/ttyGS0 by
-# usb-console-shell.service.
+# Creates gadget "g3" with TWO acm functions and binds the UDC, so the device
+# shows up on the host as two USB serial ports (/dev/ttyACM0-1 on Linux/macOS,
+# two COM ports on Windows):
+#   ttyGS0 -- root shell, attached by usb-console-shell.service
+#   ttyGS1 -- free data channel (used by tools/mx5_remote_screen)
+#
+# Both are created here rather than added later at runtime: configfs gadget
+# state does not survive a reboot, so a channel added by hand disappears on
+# every power cycle.
 #
 # NOTE: the RK3288 has a single UDC, and audio (gadget g1) / mass-storage
 # (gadget g2) bind the same one, so those scripts call remove-usb-console.sh
@@ -35,6 +40,8 @@ echo 100       > configs/c.1/MaxPower
 
 mkdir -p functions/acm.usb0
 ln -s functions/acm.usb0 configs/c.1 2>/dev/null
+mkdir -p functions/acm.usb1
+ln -s functions/acm.usb1 configs/c.1 2>/dev/null
 
 echo "$UDC" > UDC 2>/dev/null
 exit 0
