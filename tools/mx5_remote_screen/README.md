@@ -14,16 +14,19 @@ Requires the second USB serial channel from [`../mx5_usb_console`](../mx5_usb_co
 
 ## Running it
 
-**On the device** (paste the deploy blob into the root shell first — see below):
+### Installed (recommended)
+
+`./build_install_screen.py` bakes the server into the firmware and enables it at
+boot, so the screen share is live as soon as the device is up — no login, and no
+re-pasting the binary after every reboot. Chain it after the gadget mod:
 
 ```sh
-taskset -c 3 /tmp/mx5_screen_server -r 15 <> /dev/ttyGS1 >&0 2>/tmp/srv.log
+../mx5_usb_console/build_usb_console.py stock.img a.img
+./build.sh                                            # produce the ARM binary
+./build_install_screen.py                a.img     final.img
 ```
 
-`<> /dev/ttyGS1 >&0` opens the port read-write as both stdin and stdout, so
-frames go out and touch events come back on the same channel.
-
-**On the PC:**
+Then just run the viewer:
 
 ```sh
 pip install pyserial pygame
@@ -31,6 +34,29 @@ python mx5_viewer.py COM7            # or /dev/ttyACM1 on Linux/macOS
 ```
 
 Left-click to tap; click-drag to swipe.
+
+**Idle cost is negligible**: the server holds no flow-control credit until a
+viewer asks for a frame, and it never reads the framebuffer without credit — it
+just wakes briefly to check for a client. It is also `Nice=10` and pinned to
+CPU3, away from the audio path.
+
+The service is ordered `After=usb-console.service` so systemd stops it *before*
+the USB gadget is torn down. That ordering matters: a process still holding
+`/dev/ttyGS1` open while the gadget is removed can hang shutdown — which is
+exactly what happens if you background the server from a shell instead, where
+systemd knows nothing about it.
+
+### By hand (for iterating)
+
+Paste the deploy blob into the root shell (see below), then:
+
+```sh
+taskset -c 3 /tmp/mx5_screen_server -r 15 <> /dev/ttyGS1 >&0 2>/tmp/srv.log &
+```
+
+`<> /dev/ttyGS1 >&0` opens the port read-write as both stdin and stdout, so
+frames go out and touch events come back on the same channel. Kill it with
+`pkill -f mx5_screen_server` before shutting down, for the reason above.
 
 ## Building and deploying
 
@@ -110,5 +136,5 @@ Two host-side mistakes each destroyed performance, and both were measured:
 * Touch injection relies on Qt picking up a uinput device created *after* Evil
   started. It works on this firmware, but a device created later isn't
   guaranteed to be enumerated by an already-running Qt app.
-* Runs from `/tmp` and is started by hand. Making it permanent would mean adding
-  the binary and a service to the firmware image.
+* Touch injection and the framebuffer are both read/written as root; the server
+  runs as root out of necessity.
