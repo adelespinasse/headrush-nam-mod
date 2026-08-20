@@ -91,6 +91,28 @@ cost of losing Anxiety OD V2's real sound board-wide too.
 **Only flash the update file built for _your exact model and firmware_** —
 flashing another model's file will almost certainly brick the device.
 
+## Gain staging
+
+TONE and LEVEL are both **unity at 50%**, then diverge:
+
+- **0%-50%**: linear amplitude fade from true silence (0%) up to unity/0dB
+  (50%) — a plain volume taper, not a dB curve.
+- **50%-100%**: dB boost, linear in dB, 0dB (50%) up to **+12dB (100%)**.
+
+| Knob % | Gain |
+|---|---|
+| 0% | silence |
+| 10% | -14.0 dB |
+| 20% | -8.0 dB |
+| 30% | -4.4 dB |
+| 40% | -1.9 dB |
+| 50% | 0 dB (unity) |
+| 60% | +2.4 dB |
+| 70% | +4.8 dB |
+| 80% | +7.2 dB |
+| 90% | +9.6 dB |
+| 100% | +12.0 dB |
+
 ## Documentation
 
 - [docs/RECOVERY.md](docs/RECOVERY.md) — what to do if a flash goes wrong.
