@@ -206,6 +206,7 @@ function drawFrame(frame) {
 /* ---------------- input ---------------- */
 
 let dragging = false;
+let lastX = -1, lastY = -1;
 
 function sendTouch(down, ev) {
   if (!writer || !fbW) return;
@@ -217,6 +218,12 @@ function sendTouch(down, ev) {
   let y = mx;
   x = Math.max(0, Math.min(fbW - 1, x));
   y = Math.max(0, Math.min(fbH - 1, y));
+  // Drop no-op drag updates: mousemove fires far faster than the device needs,
+  // and flooding the link delays the touch-RELEASE, which turns a tap into a
+  // long press. Press and release are always sent.
+  if (down && x === lastX && y === lastY) return;
+  lastX = down ? x : -1;
+  lastY = down ? y : -1;
   const b = new Uint8Array(6);
   b[0] = 0x54;                       // 'T'
   b[1] = down ? 1 : 0;

@@ -388,11 +388,12 @@ static void seq_send(struct seq_event *e)
  * a RELATIVE value -- but airAssignments' exact convention isn't documented in
  * the firmware, and the three common ones disagree on how negative is encoded.
  * Selectable with -j so it can be settled empirically without a rebuild:
- *   0 two's complement (default): +1 -> 1,  -1 -> 127
- *   1 signed bit:                 +1 -> 1,  -1 -> 65
- *   2 binary offset (64 = zero):  +1 -> 65, -1 -> 63
- * If the knob turns the wrong way, jumps, or does nothing, try the others. */
-static int g_jog_mode = 0;
+ *   0 two's complement:            +1 -> 1,  -1 -> 127
+ *   1 signed bit (DEFAULT):        +1 -> 1,  -1 -> 65   <- verified on hardware
+ *   2 binary offset (64 = zero):   +1 -> 65, -1 -> 63
+ * Mode 1 is what the MX5's JogOutput actually expects (confirmed: direction is
+ * correct in both directions). The others are kept for other devices/firmware. */
+static int g_jog_mode = 1;
 
 static void encoder_turn(int delta)
 {
@@ -402,9 +403,9 @@ static void encoder_turn(int delta)
     for (int i = 0; i < steps; i++) {
         int v;
         switch (g_jog_mode) {
-            case 1:  v = neg ? 65 : 1;  break;
-            case 2:  v = neg ? 63 : 65; break;
-            default: v = neg ? 127 : 1; break;
+            case 0:  v = neg ? 127 : 1; break;   /* two's complement */
+            case 2:  v = neg ? 63 : 65; break;    /* binary offset */
+            default: v = neg ? 65 : 1;  break;    /* signed bit (MX5) */
         }
         struct seq_event e; memset(&e, 0, sizeof e);
         e.type = SND_SEQ_EVENT_CONTROLLER;
@@ -543,11 +544,24 @@ static uint32_t send_frame(const uint8_t *src, int force)
 
 static void handle_input(void)
 {
-    static uint8_t buf[64];
+    static uint8_t buf[1024];
     static size_t have = 0;
-    ssize_t n = read(0, buf + have, sizeof buf - have);
-    if (n <= 0) return;
-    have += n;
+
+    /* Drain everything currently available, not just one small chunk.
+     * This is called once per frame tick (~15/s); a client sends a touch event
+     * per mousemove while dragging, plus an ack per frame, plus key repeat --
+     * far more than one 64-byte read per tick can absorb. Under-reading makes
+     * input back up, which shows as clicks that do nothing and taps that behave
+     * like long presses, because the touch-RELEASE arrives seconds late. */
+    for (;;) {
+        if (have >= sizeof buf) break;
+        struct pollfd pfd = { .fd = 0, .events = POLLIN };
+        if (poll(&pfd, 1, 0) <= 0 || !(pfd.revents & POLLIN)) break;
+        ssize_t n = read(0, buf + have, sizeof buf - have);
+        if (n <= 0) break;
+        have += n;
+    }
+    if (have == 0) return;
 
     size_t i = 0;
     while (i < have) {

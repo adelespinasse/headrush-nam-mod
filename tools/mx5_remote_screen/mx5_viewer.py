@@ -183,6 +183,8 @@ def main():
         except Exception as e:
             print("encoder write failed:", e)
 
+    last_xy = [-1, -1]
+
     def send_touch(down, mx, my):
         # The panel is mounted rotated: framebuffer is portrait (w=480, h=800),
         # the physical screen is landscape (800x480). Display uses
@@ -193,6 +195,12 @@ def main():
         y = mx
         x = max(0, min(w - 1, int(x)))
         y = max(0, min(h - 1, int(y)))
+        # Drop no-op drag updates: MOUSEMOTION fires far faster than the device
+        # needs, and flooding the link delays the touch-RELEASE, which turns a
+        # tap into a long press. Press and release are always sent.
+        if down and [x, y] == last_xy:
+            return
+        last_xy[:] = [x, y] if down else [-1, -1]
         try:
             ser.write(struct.pack("<cBHH", b"T", down, x, y))
         except Exception as e:

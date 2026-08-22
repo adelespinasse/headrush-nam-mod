@@ -140,10 +140,10 @@ The port is located by **name**, since seq client numbers are assigned
 dynamically. `libasound` is `dlopen`ed, so the screen share still works if it's
 unavailable — only the encoder is lost.
 
-`JogOutput`'s relative-CC convention isn't documented in the firmware, and the
-common encodings disagree on how negative is represented, so `-j` selects it:
-`0` two's complement (default, −1 → 127), `1` signed bit (−1 → 65), `2` binary
-offset (0 → 64). If the knob turns the wrong way or does nothing, try the others.
+`JogOutput`'s relative-CC convention isn't documented in the firmware, so `-j`
+selects it. The MX5 uses **signed bit** (`-j 1`, the default: −1 → 65), confirmed
+on hardware. `-j 0` is two's complement (−1 → 127) and `-j 2` binary offset
+(0 → 64), kept for other devices or firmware.
 
 **Scheduling.** Pin to a core away from audio. On this device CPU0 services the
 I2S DMA IRQ plus ~20 Evil threads and CPU2 carries ~14 (the DSP pool), while CPU3
