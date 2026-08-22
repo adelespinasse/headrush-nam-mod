@@ -82,7 +82,11 @@ function setError(s) { errEl.textContent = s; }
 let buf = new Uint8Array(0);
 let lastFrameMs = 0;
 let watchdog = null;
-let stalled = false;
+// Set whenever the status line stops reflecting a live connection: on connect,
+// on reconnect, and after a stall. Cleared by the next frame that draws.
+// ensureCanvas() can't own this -- it early-returns when the geometry is
+// unchanged, so reconnecting to the same device would never update the status.
+let needStatus = false;
 
 function append(chunk) {
   const next = new Uint8Array(buf.length + chunk.length);
@@ -183,8 +187,10 @@ function ensureCanvas(w, h, tile) {
   offCtx = off.getContext("2d");
   screenEl.width = h;            // landscape: rotated
   screenEl.height = w;
-  setStatus(`connected: ${w}x${h}`);
+  needStatus = true;
 }
+
+function statusConnected() { return `connected: ${fbW}x${fbH}`; }
 
 function drawFrame(frame) {
   ensureCanvas(frame.w, frame.h, frame.tile);
@@ -303,6 +309,7 @@ async function run(p) {
   writer = port.writable.getWriter();
   reader = port.readable.getReader();
   buf = new Uint8Array(0);                      // no stale bytes from a prior port
+  needStatus = true;
 
   await writer.write(new Uint8Array([0x4b]));   // 'K': send me a keyframe
 
@@ -319,7 +326,7 @@ async function run(p) {
     if (!writer || performance.now() - lastFrameMs < 2000) return;
     buf = new Uint8Array(0);                       // drop the partial frame
     lastFrameMs = performance.now();               // re-arm before retrying
-    stalled = true;
+    needStatus = true;
     writer.write(new Uint8Array([0x4b])).catch(() => {});   // resync + reset credit
     setStatus("stalled — resyncing…");
   }, 1000);
@@ -334,7 +341,7 @@ async function run(p) {
         const r = tryParseFrame();
         if (r === "need-more" || r === "none") break;
         drawFrame(r);
-        if (stalled) { setStatus(`connected: ${fbH}x${fbW}`); stalled = false; }
+        if (needStatus) { setStatus(statusConnected()); needStatus = false; }
         lastFrameMs = performance.now();
         // Ack: the server sends the next frame only once we've consumed this
         // one. Without this pacing the device outruns us and latency grows
