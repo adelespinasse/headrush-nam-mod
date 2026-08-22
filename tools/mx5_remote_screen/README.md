@@ -42,6 +42,13 @@ port for a keyframe and keeps the one that answers with the `MX5S` magic.
 Probing the shell port leaves a stray `K` in its input line, so the probe sends
 `^U` to erase it; nothing is executed, as no newline is ever sent.
 
+The button stays live as **Change port…** once connected, so you can move to a
+different port without reloading — an OS may hand the device a different name on
+a later boot, and it's easy to pick the wrong one of the two. A manual pick is
+probed just like an automatic one, so choosing the shell port reports that
+plainly instead of hanging. Cancelling the picker leaves the current connection
+untouched.
+
 Permissions are stored per origin. A `file://` page may not persist them
 reliably, so if auto-connect doesn't stick, serve the directory over localhost —
 that gives a stable origin and the grant survives.

@@ -62,9 +62,17 @@ const connectBtn = document.getElementById("connect");
 // landscape because the MX5's panel is mounted rotated.
 let off = null, offCtx = null;
 let fbW = 0, fbH = 0, tileSize = 0;
-let port = null, writer = null;
+let port = null, writer = null, reader = null;
+let running = null, switching = false;
 
 function setStatus(s) { statEl.textContent = s; }
+
+// The button stays live once connected -- an OS can hand the device a different
+// port on a later boot, and a user can pick the wrong one -- so switching has to
+// remain possible rather than being a one-shot at startup.
+function setConnected(on) {
+  connectBtn.textContent = on ? "Change port…" : "Connect";
+}
 function setError(s) { errEl.textContent = s; }
 
 /* ---------------- stream buffer ---------------- */
@@ -293,7 +301,8 @@ async function run(p) {
   // driver buffer: 12 MB/s collapsed to 0.6 MB/s.)
   await port.open({ baudRate: 115200, bufferSize: 1024 * 1024 });
   writer = port.writable.getWriter();
-  const reader = port.readable.getReader();
+  reader = port.readable.getReader();
+  buf = new Uint8Array(0);                      // no stale bytes from a prior port
 
   await writer.write(new Uint8Array([0x4b]));   // 'K': send me a keyframe
 
@@ -334,15 +343,31 @@ async function run(p) {
       }
     }
   } catch (e) {
-    setError("read: " + e.message);
+    if (!switching) setError("read: " + e.message);
   } finally {
     clearInterval(watchdog);
     watchdog = null;
+    // Release everything: the port must be fully closed before it -- or another
+    // port -- can be opened again.
+    try { reader.releaseLock(); } catch (e) {}
     try { writer.releaseLock(); } catch (e) {}
-    writer = null;
-    connectBtn.disabled = false;
-    setStatus("disconnected");
+    reader = null; writer = null;
+    try { await port.close(); } catch (e) {}
+    port = null;
+    if (!switching) { setConnected(false); setStatus("disconnected"); }
   }
+}
+
+/* Tear down the current link and wait for run() to finish unwinding. Switching
+ * ports requires this: a port can't be reopened while its reader/writer locks
+ * are held, and two live readers would fight over the same stream. */
+async function disconnect() {
+  if (!running) return;
+  switching = true;
+  try { if (reader) await reader.cancel(); } catch (e) {}
+  try { await running; } catch (e) {}
+  running = null;
+  switching = false;
 }
 
 /* Auto-reconnect.
@@ -396,17 +421,31 @@ async function looksLikeServer(p) {
   }
 }
 
+let autoBusy = false;
+
 async function autoConnect() {
-  if (!("serial" in navigator)) return false;
+  // The "connect" event can fire while a probe is already in flight, and two
+  // concurrent probes would fight over opening the same ports.
+  if (autoBusy || running || !("serial" in navigator)) return false;
+  autoBusy = true;
+  try {
+    return await autoConnectInner();
+  } finally {
+    autoBusy = false;
+  }
+}
+
+async function autoConnectInner() {
   let ports = [];
   try { ports = await navigator.serial.getPorts(); } catch (e) { return false; }
   if (!ports.length) return false;
   setStatus("looking for the MX5…");
   for (const p of ports) {
     if (!(await looksLikeServer(p))) continue;
-    connectBtn.disabled = true;
     setStatus("connecting…");
-    try { await run(p); } catch (e) { setError(e.message); connectBtn.disabled = false; }
+    setConnected(true);
+    running = run(p);
+    try { await running; } catch (e) { setError(e.message); }
     return true;
   }
   setStatus("not connected");
@@ -420,15 +459,35 @@ connectBtn.addEventListener("click", async () => {
              "(and a secure context: file:// or localhost).");
     return;
   }
+  // Show the picker BEFORE tearing anything down, so cancelling it leaves a
+  // working connection alone. requestPort() needs the user gesture, and we are
+  // still inside the click handler here.
+  let p;
   try {
-    const p = await navigator.serial.requestPort();
-    connectBtn.disabled = true;
-    setStatus("connecting…");
-    await run(p);
+    p = await navigator.serial.requestPort();
   } catch (e) {
-    setError(e.message);
-    connectBtn.disabled = false;
+    return;                                   // cancelled -- keep the current link
   }
+
+  await disconnect();
+
+  // Validate the manual pick too. Auto-connect probes, but without this a user
+  // who chooses the shell port instead of the data port gets a viewer that sits
+  // there forever with no indication of what went wrong.
+  setStatus("checking port…");
+  if (!(await looksLikeServer(p))) {
+    setConnected(false);
+    setStatus("not connected");
+    setError("That port didn't answer. The MX5 exposes two: pick the second " +
+             "(data) one, not the shell. Also check that mx5_screen_server is " +
+             "running on the device.");
+    return;
+  }
+
+  setStatus("connecting…");
+  setConnected(true);
+  running = run(p);
+  try { await running; } catch (e) { setError(e.message); }
 });
 
 // Also fires when the MX5 is plugged in or finishes rebooting, so the viewer
