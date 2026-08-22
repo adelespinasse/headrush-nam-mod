@@ -83,6 +83,15 @@ function append(chunk) {
   buf = next;
 }
 
+// Scan a standalone array (the probe must not disturb the global `buf`).
+function hasMagic(a) {
+  for (let i = 0; i + 4 <= a.length; i++) {
+    if (a[i] === MAGIC[0] && a[i+1] === MAGIC[1] &&
+        a[i+2] === MAGIC[2] && a[i+3] === MAGIC[3]) return true;
+  }
+  return false;
+}
+
 function findMagic(from) {
   for (let i = from; i + 4 <= buf.length; i++) {
     if (buf[i] === MAGIC[0] && buf[i+1] === MAGIC[1] &&
@@ -329,7 +338,79 @@ async function run(p) {
   } finally {
     clearInterval(watchdog);
     watchdog = null;
+    try { writer.releaseLock(); } catch (e) {}
+    writer = null;
+    connectBtn.disabled = false;
+    setStatus("disconnected");
   }
+}
+
+/* Auto-reconnect.
+ *
+ * requestPort() needs a user gesture, but that is a ONE-TIME cost per origin:
+ * getPorts() returns everything already granted with no gesture and no dialog,
+ * and open() on an already-permitted port needs no gesture either. So a second
+ * visit can connect by itself.
+ *
+ * Which port, though? The MX5 exposes two ACM functions from a single composite
+ * gadget -- ttyGS0 (root shell) and ttyGS1 (this data channel) -- so they share
+ * a VID/PID, and getInfo() exposes nothing else to tell them apart. Port order
+ * is not guaranteed either. So probe instead: the protocol is self-describing,
+ * so ask for a keyframe and see whether an "MX5S" magic comes back.
+ *
+ * Probing the shell port is harmless but not invisible: the 'K' lands in the
+ * shell's input line. We send ^U afterwards to erase it, which the server's
+ * parser ignores as noise. Nothing is ever executed -- no newline is sent. */
+const PROBE_MS = 1500;
+
+async function looksLikeServer(p) {
+  let reader = null, w = null;
+  try {
+    await p.open({ baudRate: 115200, bufferSize: 1024 * 1024 });
+    w = p.writable.getWriter();
+    reader = p.readable.getReader();
+    await w.write(new Uint8Array([0x4b]));                 // 'K'
+    let seen = new Uint8Array(0), hit = false;
+    const deadline = performance.now() + PROBE_MS;
+    while (performance.now() < deadline) {
+      const t = setTimeout(() => reader.cancel().catch(() => {}),
+                           Math.max(0, deadline - performance.now()));
+      const { value, done } = await reader.read();
+      clearTimeout(t);
+      if (done) break;
+      if (value && value.length) {
+        const merged = new Uint8Array(seen.length + value.length);
+        merged.set(seen); merged.set(value, seen.length);
+        seen = merged.slice(-4096);
+        if (hasMagic(seen)) { hit = true; break; }
+      }
+    }
+    if (!hit) await w.write(new Uint8Array([0x15])).catch(() => {});  // ^U
+    return hit;
+  } catch (e) {
+    return false;
+  } finally {
+    try { if (reader) { await reader.cancel(); reader.releaseLock(); } } catch (e) {}
+    try { if (w) w.releaseLock(); } catch (e) {}
+    try { await p.close(); } catch (e) {}
+  }
+}
+
+async function autoConnect() {
+  if (!("serial" in navigator)) return false;
+  let ports = [];
+  try { ports = await navigator.serial.getPorts(); } catch (e) { return false; }
+  if (!ports.length) return false;
+  setStatus("looking for the MX5…");
+  for (const p of ports) {
+    if (!(await looksLikeServer(p))) continue;
+    connectBtn.disabled = true;
+    setStatus("connecting…");
+    try { await run(p); } catch (e) { setError(e.message); connectBtn.disabled = false; }
+    return true;
+  }
+  setStatus("not connected");
+  return false;
 }
 
 connectBtn.addEventListener("click", async () => {
@@ -349,4 +430,13 @@ connectBtn.addEventListener("click", async () => {
     connectBtn.disabled = false;
   }
 });
+
+// Also fires when the MX5 is plugged in or finishes rebooting, so the viewer
+// picks the stream back up on its own instead of needing a reload.
+if ("serial" in navigator) {
+  navigator.serial.addEventListener("connect", () => {
+    if (!writer) autoConnect();
+  });
+  autoConnect();
+}
 </script>

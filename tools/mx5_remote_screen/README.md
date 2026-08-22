@@ -32,6 +32,19 @@ interchangeable.
 **Browser (no dependencies)** — open `mx5_viewer.html` in Chrome or Edge, click
 **Connect**, and pick the *second* MX5 serial port (the data channel; the first
 is the shell). Uses the Web Serial API, so there is nothing to install.
+
+You only pick it once. `requestPort()` needs a user gesture, but `getPorts()`
+returns already-granted ports without one, so later visits connect on their own —
+and the viewer also reconnects when the MX5 is plugged in or finishes rebooting.
+Because both ACM ports come from one composite gadget they share a VID/PID and
+`getInfo()` can't distinguish them, so the viewer probes: it asks each granted
+port for a keyframe and keeps the one that answers with the `MX5S` magic.
+Probing the shell port leaves a stray `K` in its input line, so the probe sends
+`^U` to erase it; nothing is executed, as no newline is ever sent.
+
+Permissions are stored per origin. A `file://` page may not persist them
+reliably, so if auto-connect doesn't stick, serve the directory over localhost —
+that gives a stable origin and the grant survives.
 Not available in Firefox or Safari, which don't implement Web Serial. It needs a
 secure context: opening the file directly works in Chrome, but if
 `navigator.serial` is missing, serve the directory over localhost instead.
