@@ -138,6 +138,12 @@ rather than dying.
 **Input.** Touches are injected via `/dev/uinput` as an absolute multitouch
 device, so they look like the real ili2116 touchscreen to Qt.
 
+The server never exits holding a contact down — it releases on `SIGTERM`/`SIGINT`
+and via `atexit`. This matters more than it sounds: if it dies mid-touch, the last
+thing Qt saw was a press with no release, so whichever QML item took that press
+keeps its **grab**. Qt grabs are scene-wide rather than per-device, so the
+*physical* touchscreen stops responding too, and only a reboot clears it.
+
 **Encoder.** The knob is *not* an input device — it's the control-surface MCU
 sending MIDI over a serial link (`snd-serdev-midi`), which Evil consumes through
 the ALSA sequencer. So uinput can't reach it; the server has to become a MIDI

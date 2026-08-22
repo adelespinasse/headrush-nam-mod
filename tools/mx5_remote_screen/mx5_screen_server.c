@@ -99,6 +99,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <signal.h>
 #include <sys/file.h>
 #include <sys/mman.h>
 #include <dlfcn.h>
@@ -271,6 +272,10 @@ static long now_ms(void)
     return t.tv_sec * 1000L + t.tv_nsec / 1000000L;
 }
 
+static int g_touch_down = 0;
+static int g_encoder_down = 0;
+static void encoder_press(int down);
+
 static void touch(int down, int x, int y)
 {
     static int tracking = 1;
@@ -301,6 +306,24 @@ static void touch(int down, int x, int y)
         if (++tracking > 60000) tracking = 1;
     }
     ev(EV_SYN, SYN_REPORT, 0);
+    g_touch_down = down;
+}
+
+/* Never exit holding a contact down. If we die mid-touch, the last thing Qt saw
+ * was a press with no release, so whichever QML item took that press keeps its
+ * grab -- and a Qt grab is scene-wide, not per-device, so the REAL touchscreen
+ * stops responding too. Recovering needs a reboot, which is a nasty thing to
+ * leave behind just because someone stopped the service at the wrong moment. */
+static void release_touch_on_exit(void)
+{
+    if (g_touch_down) touch(0, 0, 0);
+    if (g_encoder_down) encoder_press(0);
+}
+
+static void on_signal(int sig)
+{
+    release_touch_on_exit();
+    _exit(128 + sig);
 }
 
 
@@ -471,6 +494,7 @@ static void encoder_turn(int delta)
  * PressAndHoldOutput to EncoderEnter (+ EncoderTimer for long press). */
 static void encoder_press(int down)
 {
+    g_encoder_down = down;
     if (g_verbose) fprintf(stderr, "encoder %s\n", down ? "PRESS" : "RELEASE");
     struct seq_event e; memset(&e, 0, sizeof e);
     e.type = down ? SND_SEQ_EVENT_NOTEON : SND_SEQ_EVENT_NOTEOFF;
@@ -681,6 +705,11 @@ int main(int argc, char **argv)
     single_instance();
     fb_open(fbdev);
     ui_open();
+    atexit(release_touch_on_exit);
+    signal(SIGTERM, on_signal);
+    signal(SIGINT,  on_signal);
+    signal(SIGHUP,  on_signal);
+    signal(SIGPIPE, SIG_IGN);
     encoder_open();
 
     long period_ns = 1000000000L / fps;
