@@ -26,14 +26,24 @@ re-pasting the binary after every reboot. Chain it after the gadget mod:
 ./build_install_screen.py                a.img     final.img
 ```
 
-Then just run the viewer:
+Then open a viewer. Two are provided; they speak the same protocol and are
+interchangeable.
+
+**Browser (no dependencies)** — open `mx5_viewer.html` in Chrome or Edge, click
+**Connect**, and pick the *second* MX5 serial port (the data channel; the first
+is the shell). Uses the Web Serial API, so there is nothing to install.
+Not available in Firefox or Safari, which don't implement Web Serial. It needs a
+secure context: opening the file directly works in Chrome, but if
+`navigator.serial` is missing, serve the directory over localhost instead.
+
+**Python**
 
 ```sh
 pip install pyserial pygame
 python mx5_viewer.py COM7            # or /dev/ttyACM1 on Linux/macOS
 ```
 
-Left-click to tap; click-drag to swipe.
+Left-click to tap; click-drag to swipe, in either viewer.
 
 **Idle cost is negligible**: the server holds no flow-control credit until a
 viewer asks for a frame, and it never reads the framebuffer without credit — it
@@ -120,14 +130,17 @@ needed on the device.
 Two host-side mistakes each destroyed performance, and both were measured:
 
 1. **Driver buffer too small.** Leaving pyserial's Windows RX buffer at its 4 KB
-   default throttled 12 MB/s down to 0.6 MB/s. Hence `set_buffer_size`.
+   default throttled 12 MB/s down to 0.6 MB/s. Hence `set_buffer_size`. The
+   browser viewer has the same hazard in a different guise: Web Serial's
+   `open({bufferSize})` defaults to **255 bytes**, so it passes 1 MB explicitly.
 2. **Asking `read()` for more than needed.** `read(n)` blocks until n bytes
    arrive *or the timeout expires*, so requesting 64 KB "for batching" makes
    every read wait out the timeout instead of returning available data. This
    produced multi-second lag, and mid-frame timeouts then caused stream
    desyncs that looked like device-side corruption. `Reader._fill` now asks for
    exactly the deficit and then drains `in_waiting`, which batches without ever
-   waiting.
+   waiting. Web Serial avoids this trap by construction -- its `read()` returns
+   whatever has arrived rather than waiting for a requested count.
 
 ## Limitations
 

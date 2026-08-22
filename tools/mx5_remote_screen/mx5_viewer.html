@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<!--
+  mx5_viewer.html -- browser viewer for mx5_screen_server, using Web Serial.
+
+  Same job as mx5_viewer.py, with no Python/pygame/pyserial to install: open this
+  file in Chrome or Edge, click Connect, pick the MX5's data port.
+
+  REQUIREMENTS
+    * Chromium-based browser (Chrome, Edge, Opera). Web Serial is not
+      implemented in Firefox or Safari.
+    * A secure context. Opening this file directly (file://) works in Chrome;
+      if navigator.serial is missing, serve the directory over localhost
+      instead (any static file server will do).
+    * Pick the SECOND MX5 serial port (the data channel, ttyGS1). The first is
+      the root shell.
+
+  PROTOCOL: see mx5_screen_server.c. Frames are self-describing (magic header),
+  tiles are RLE or raw, and the viewer acks each frame for flow control.
+-->
+<meta charset="utf-8">
+<title>HeadRush MX5 remote screen</title>
+<style>
+  body { background:#1b1b1d; color:#ddd; font:14px/1.4 system-ui, sans-serif;
+         margin:0; padding:16px; }
+  #bar { display:flex; gap:12px; align-items:center; margin-bottom:12px; }
+  button { font:inherit; padding:6px 14px; border-radius:6px; border:1px solid #555;
+           background:#2d2d30; color:#eee; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  #screen { border:1px solid #444; image-rendering:pixelated; cursor:crosshair;
+            display:block; }
+  #stat { color:#8a8; font-variant-numeric:tabular-nums; }
+  #err { color:#e77; }
+</style>
+
+<div id="bar">
+  <button id="connect">Connect…</button>
+  <span id="stat">not connected</span>
+  <span id="err"></span>
+</div>
+<canvas id="screen" width="800" height="480"></canvas>
+
+<script>
+"use strict";
+
+// Must match mx5_screen_server.c
+const MAGIC = [0x4d, 0x58, 0x35, 0x53];   // "MX5S"
+const PROTO_VER = 3;
+const HDR_LEN = 24;
+const ENC_RAW = 0, ENC_RLE = 1;
+
+const screenEl = document.getElementById("screen");
+const ctx = screenEl.getContext("2d");
+const statEl = document.getElementById("stat");
+const errEl = document.getElementById("err");
+const connectBtn = document.getElementById("connect");
+
+// Framebuffer-orientation backing store (portrait); the visible canvas is
+// landscape because the MX5's panel is mounted rotated.
+let off = null, offCtx = null;
+let fbW = 0, fbH = 0, tileSize = 0;
+let port = null, writer = null;
+let frames = 0, resyncs = 0;
+
+function setStatus(s) { statEl.textContent = s; }
+function setError(s) { errEl.textContent = s; }
+
+/* ---------------- stream buffer ---------------- */
+// Web Serial hands us whatever bytes have arrived -- unlike pyserial there is no
+// "block until N bytes" call to misuse, so we just accumulate and parse what we
+// can. We still need our own buffering because frames span reads.
+let buf = new Uint8Array(0);
+
+function append(chunk) {
+  const next = new Uint8Array(buf.length + chunk.length);
+  next.set(buf, 0);
+  next.set(chunk, buf.length);
+  buf = next;
+}
+
+function findMagic(from) {
+  for (let i = from; i + 4 <= buf.length; i++) {
+    if (buf[i] === MAGIC[0] && buf[i+1] === MAGIC[1] &&
+        buf[i+2] === MAGIC[2] && buf[i+3] === MAGIC[3]) return i;
+  }
+  return -1;
+}
+
+/* Try to parse one complete frame out of `buf`.
+   Returns "need-more" if the frame is incomplete (wait for more bytes),
+   "none" if there's no header yet, or an object describing the frame. */
+function tryParseFrame() {
+  let search = 0;
+  for (;;) {
+    const i = findMagic(search);
+    if (i < 0) {
+      // Drop everything except a possible partial magic at the tail.
+      if (buf.length > 3) buf = buf.slice(buf.length - 3);
+      return "none";
+    }
+    if (buf.length - i < HDR_LEN) {
+      if (i > 0) buf = buf.slice(i);
+      return "need-more";
+    }
+    const dv = new DataView(buf.buffer, buf.byteOffset + i, HDR_LEN);
+    const ver = dv.getUint16(4, true);
+    const tile = dv.getUint16(6, true);
+    const w = dv.getUint32(8, true);
+    const h = dv.getUint32(12, true);
+    const bpp = dv.getUint32(16, true);
+    const ntiles = dv.getUint32(20, true);
+    const txCount = Math.ceil(w / tile), tyCount = Math.ceil(h / tile);
+    const sane = ver === PROTO_VER && [8,16,32,64].includes(tile) && bpp === 32 &&
+                 w > 0 && w <= 4096 && h > 0 && h <= 4096 &&
+                 ntiles <= txCount * tyCount;
+    if (!sane) {
+      // Pixel data can contain the magic bytes. Advance ONE byte and keep
+      // hunting, rather than skipping the header length (which could swallow a
+      // real header starting inside the false one).
+      search = i + 1;
+      continue;
+    }
+
+    // Walk the tile records to see whether the whole frame has arrived.
+    let p = i + HDR_LEN;
+    const tiles = [];
+    for (let t = 0; t < ntiles; t++) {
+      if (p + 9 > buf.length) { if (i > 0) buf = buf.slice(i); return "need-more"; }
+      const tdv = new DataView(buf.buffer, buf.byteOffset + p, 9);
+      const tx = tdv.getUint16(0, true);
+      const ty = tdv.getUint16(2, true);
+      const enc = tdv.getUint8(4);
+      const len = tdv.getUint32(5, true);
+      const tileBytes = tile * tile * 4;
+      if (len > tileBytes || (enc === ENC_RAW && len !== tileBytes)) {
+        search = i + 1; break;                     // malformed -> false header
+      }
+      if (p + 9 + len > buf.length) { if (i > 0) buf = buf.slice(i); return "need-more"; }
+      tiles.push({ tx, ty, enc, off: p + 9, len });
+      p += 9 + len;
+      if (t === ntiles - 1) {
+        // Keep a reference to the array these offsets index into: `buf` is
+        // about to be replaced by slice(), and a stale alias would decode
+        // garbage.
+        const frame = { tile, w, h, tiles, src: buf };
+        buf = buf.slice(p);
+        return frame;
+      }
+    }
+    if (ntiles === 0) { const src = buf; buf = buf.slice(p); return { tile, w, h, tiles: [], src }; }
+    if (search <= i) return "need-more";
+  }
+}
+
+/* ---------------- rendering ---------------- */
+
+function ensureCanvas(w, h, tile) {
+  if (fbW === w && fbH === h && tileSize === tile) return;
+  fbW = w; fbH = h; tileSize = tile;
+  off = new OffscreenCanvas(w, h);
+  offCtx = off.getContext("2d");
+  screenEl.width = h;            // landscape: rotated
+  screenEl.height = w;
+  setStatus(`connected: ${w}x${h}, tile ${tile}`);
+}
+
+function drawFrame(frame) {
+  ensureCanvas(frame.w, frame.h, frame.tile);
+  const tile = frame.tile;
+  const src = frame.src;
+  const img = offCtx.createImageData(tile, tile);
+  const px = img.data;
+
+  for (const t of frame.tiles) {
+    // The framebuffer is BGRX: byte 3 is padding (0x00 on this device), NOT
+    // alpha. Swizzle to RGBA and force alpha opaque -- treating the pad byte as
+    // alpha renders a fully transparent (black) image from perfect data.
+    if (t.enc === ENC_RLE) {
+      let o = 0;
+      for (let s = t.off; s < t.off + t.len; s += 6) {
+        const count = src[s] | (src[s+1] << 8);
+        const b = src[s+2], g = src[s+3], r = src[s+4];
+        for (let n = 0; n < count; n++) {
+          px[o++] = r; px[o++] = g; px[o++] = b; px[o++] = 255;
+        }
+      }
+    } else {
+      let o = 0;
+      for (let s = t.off; s < t.off + t.len; s += 4) {
+        px[o++] = src[s+2]; px[o++] = src[s+1]; px[o++] = src[s]; px[o++] = 255;
+      }
+    }
+    offCtx.putImageData(img, t.tx * tile, t.ty * tile);
+  }
+
+  // Rotate portrait framebuffer -> landscape display.
+  // Maps fb (x,y) -> display (y, fbW-1-x), i.e. the same mapping the click
+  // handler inverts below.
+  ctx.setTransform(0, -1, 1, 0, 0, fbW);
+  ctx.drawImage(off, 0, 0);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+/* ---------------- input ---------------- */
+
+let dragging = false;
+
+function sendTouch(down, ev) {
+  if (!writer || !fbW) return;
+  const r = screenEl.getBoundingClientRect();
+  const mx = Math.round((ev.clientX - r.left) * (screenEl.width / r.width));
+  const my = Math.round((ev.clientY - r.top) * (screenEl.height / r.height));
+  // Inverse of the display rotation above.
+  let x = fbW - 1 - my;
+  let y = mx;
+  x = Math.max(0, Math.min(fbW - 1, x));
+  y = Math.max(0, Math.min(fbH - 1, y));
+  const b = new Uint8Array(6);
+  b[0] = 0x54;                       // 'T'
+  b[1] = down ? 1 : 0;
+  b[2] = x & 0xff; b[3] = (x >> 8) & 0xff;
+  b[4] = y & 0xff; b[5] = (y >> 8) & 0xff;
+  writer.write(b).catch(e => setError("touch: " + e.message));
+}
+
+screenEl.addEventListener("mousedown", e => { dragging = true; sendTouch(true, e); });
+screenEl.addEventListener("mousemove", e => { if (dragging) sendTouch(true, e); });
+window.addEventListener("mouseup", e => { if (dragging) { dragging = false; sendTouch(false, e); } });
+
+/* ---------------- connection ---------------- */
+
+async function run(p) {
+  port = p;
+  // bufferSize matters: the default is 255 bytes, which throttles the link
+  // badly. (The Python viewer hit the same class of problem with an undersized
+  // driver buffer: 12 MB/s collapsed to 0.6 MB/s.)
+  await port.open({ baudRate: 115200, bufferSize: 1024 * 1024 });
+  writer = port.writable.getWriter();
+  const reader = port.readable.getReader();
+
+  await writer.write(new Uint8Array([0x4b]));   // 'K': send me a keyframe
+
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value && value.length) append(value);
+
+      for (;;) {
+        const r = tryParseFrame();
+        if (r === "need-more" || r === "none") break;
+        drawFrame(r);
+        frames++;
+        if ((frames & 31) === 0) {
+          setStatus(`connected: ${fbW}x${fbH} — ${frames} frames` +
+                    (resyncs ? `, ${resyncs} resyncs` : ""));
+        }
+        // Ack: the server sends the next frame only once we've consumed this
+        // one. Without this pacing the device outruns us and latency grows
+        // without bound, because delta frames can't be dropped to catch up.
+        await writer.write(new Uint8Array([0x41]));   // 'A'
+      }
+    }
+  } catch (e) {
+    setError("read: " + e.message);
+  }
+}
+
+connectBtn.addEventListener("click", async () => {
+  setError("");
+  if (!("serial" in navigator)) {
+    setError("This browser has no Web Serial API — use Chrome or Edge " +
+             "(and a secure context: file:// or localhost).");
+    return;
+  }
+  try {
+    const p = await navigator.serial.requestPort();
+    connectBtn.disabled = true;
+    setStatus("connecting…");
+    await run(p);
+  } catch (e) {
+    setError(e.message);
+    connectBtn.disabled = false;
+  }
+});
+</script>
