@@ -72,6 +72,9 @@ function setError(s) { errEl.textContent = s; }
 // "block until N bytes" call to misuse, so we just accumulate and parse what we
 // can. We still need our own buffering because frames span reads.
 let buf = new Uint8Array(0);
+let lastFrameMs = 0;
+let watchdog = null;
+let stalled = false;
 
 function append(chunk) {
   const next = new Uint8Array(buf.length + chunk.length);
@@ -285,6 +288,24 @@ async function run(p) {
 
   await writer.write(new Uint8Array([0x4b]));   // 'K': send me a keyframe
 
+  // Watchdog. The ack below is only sent once a COMPLETE frame parses, and the
+  // server sends nothing without credit -- so if bytes are lost mid-frame the
+  // parser waits for a tail that will never come, the ack is never sent, and
+  // both ends wait on each other forever. Web Serial's read() has no timeout,
+  // so unlike the Python viewer (which recovers via pyserial's timeout) nothing
+  // here would ever break the deadlock: the screen freezes while input keeps
+  // working, because input travels the other direction entirely.
+  lastFrameMs = performance.now();
+  clearInterval(watchdog);
+  watchdog = setInterval(() => {
+    if (!writer || performance.now() - lastFrameMs < 2000) return;
+    buf = new Uint8Array(0);                       // drop the partial frame
+    lastFrameMs = performance.now();               // re-arm before retrying
+    stalled = true;
+    writer.write(new Uint8Array([0x4b])).catch(() => {});   // resync + reset credit
+    setStatus("stalled — resyncing…");
+  }, 1000);
+
   try {
     for (;;) {
       const { value, done } = await reader.read();
@@ -295,6 +316,8 @@ async function run(p) {
         const r = tryParseFrame();
         if (r === "need-more" || r === "none") break;
         drawFrame(r);
+        if (stalled) { setStatus(`connected: ${fbH}x${fbW}`); stalled = false; }
+        lastFrameMs = performance.now();
         // Ack: the server sends the next frame only once we've consumed this
         // one. Without this pacing the device outruns us and latency grows
         // without bound, because delta frames can't be dropped to catch up.
@@ -303,6 +326,9 @@ async function run(p) {
     }
   } catch (e) {
     setError("read: " + e.message);
+  } finally {
+    clearInterval(watchdog);
+    watchdog = null;
   }
 }
 

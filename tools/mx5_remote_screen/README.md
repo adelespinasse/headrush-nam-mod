@@ -129,6 +129,15 @@ pacing the device outruns the host and latency grows without bound. While the
 server holds no credit it leaves its shadow buffer untouched, so changes
 accumulate and coalesce into the next frame it may send.
 
+**Stall recovery.** Flow control and resync interact badly if a frame is
+truncated: the ack is only sent once a *complete* frame parses, and the server
+sends nothing without credit, so a few lost bytes leave the parser waiting for a
+tail that never comes and both ends wait on each other forever. The screen
+freezes while input keeps working, since input travels the other direction. The
+Python viewer escapes via pyserial's read timeout; Web Serial's `read()` has no
+timeout, so the browser viewer runs a 1 s watchdog that drops the partial frame
+and re-requests a keyframe after 2 s without one.
+
 **Resync.** Every frame carries a self-describing header with a magic, so a
 viewer can attach, detach and reattach at any time — a serial port has no
 connection semantics, so there's no other way to know a client appeared. On any
