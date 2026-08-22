@@ -186,7 +186,11 @@ static void ui_open(void)
     struct uinput_setup us;
     struct uinput_abs_setup abs;
 
-    ui_fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+    /* NOT O_NONBLOCK: with a non-blocking fd a full buffer makes write() fail
+     * with EAGAIN, and a silently dropped touch-RELEASE leaves the contact
+     * stuck down -- i.e. a tap becomes a long press. uinput writes do not
+     * block in practice. */
+    ui_fd = open("/dev/uinput", O_WRONLY);
     if (ui_fd < 0) { perror("open /dev/uinput (touch disabled)"); return; }
 
     ioctl(ui_fd, UI_SET_EVBIT, EV_ABS);
@@ -220,18 +224,37 @@ static void ui_open(void)
     fprintf(stderr, "uinput: virtual touchscreen created (%ux%u)\n", g_w, g_h);
 }
 
+static int g_verbose = 0;
+
 static void ev(int type, int code, int val)
 {
     struct input_event e;
     memset(&e, 0, sizeof e);
     e.type = type; e.code = code; e.value = val;
-    if (write(ui_fd, &e, sizeof e) < 0) { /* non-fatal */ }
+    ssize_t w = write(ui_fd, &e, sizeof e);
+    if (w != (ssize_t)sizeof e)
+        fprintf(stderr, "uinput: DROPPED event type=%d code=%d val=%d (%s)\n",
+                type, code, val, strerror(errno));
+}
+
+static long now_ms(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1000L + t.tv_nsec / 1000000L;
 }
 
 static void touch(int down, int x, int y)
 {
     static int tracking = 1;
+    static long last_ms = 0;
     if (ui_fd < 0) return;
+    if (g_verbose) {
+        long t = now_ms();
+        fprintf(stderr, "touch %-5s x=%3d y=%3d  (+%ldms)\n",
+                down ? "DOWN" : "UP", x, y, last_ms ? t - last_ms : 0);
+        last_ms = t;
+    }
     if (x < 0) x = 0;
     if ((uint32_t)x >= g_w) x = (int)g_w - 1;
     if (y < 0) y = 0;
@@ -397,6 +420,7 @@ static int g_jog_mode = 1;
 
 static void encoder_turn(int delta)
 {
+    if (g_verbose) fprintf(stderr, "encoder turn %+d\n", delta);
     int steps = delta < 0 ? -delta : delta;
     int neg = delta < 0;
     if (steps > 16) steps = 16;
@@ -420,6 +444,7 @@ static void encoder_turn(int delta)
  * PressAndHoldOutput to EncoderEnter (+ EncoderTimer for long press). */
 static void encoder_press(int down)
 {
+    if (g_verbose) fprintf(stderr, "encoder %s\n", down ? "PRESS" : "RELEASE");
     struct seq_event e; memset(&e, 0, sizeof e);
     e.type = down ? SND_SEQ_EVENT_NOTEON : SND_SEQ_EVENT_NOTEOFF;
     e.data.note.channel = 0;
@@ -603,6 +628,7 @@ int main(int argc, char **argv)
         if (!strcmp(argv[i], "-f") && i + 1 < argc) fbdev = argv[++i];
         else if (!strcmp(argv[i], "-r") && i + 1 < argc) fps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-j") && i + 1 < argc) g_jog_mode = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-v")) g_verbose = 1;
         else {
             fprintf(stderr,
                 "usage: %s [-f /dev/fb0] [-r fps]\n"
