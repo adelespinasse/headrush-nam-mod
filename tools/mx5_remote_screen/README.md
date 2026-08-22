@@ -43,7 +43,9 @@ pip install pyserial pygame
 python mx5_viewer.py COM7            # or /dev/ttyACM1 on Linux/macOS
 ```
 
-Left-click to tap; click-drag to swipe, in either viewer.
+Left-click to tap; click-drag to swipe. **Arrow keys turn the encoder knob**
+(up/left = counter-clockwise, down/right = clockwise) and **space/enter presses
+it**. Both viewers support this.
 
 **Idle cost is negligible**: the server holds no flow-control credit until a
 viewer asks for a frame, and it never reads the framebuffer without credit — it
@@ -115,6 +117,33 @@ rather than dying.
 
 **Input.** Touches are injected via `/dev/uinput` as an absolute multitouch
 device, so they look like the real ili2116 touchscreen to Qt.
+
+**Encoder.** The knob is *not* an input device — it's the control-surface MCU
+sending MIDI over a serial link (`snd-serdev-midi`), which Evil consumes through
+the ALSA sequencer. So uinput can't reach it; the server has to become a MIDI
+source. Evil creates one ALSA seq client per MIDI device:
+
+```
+client  20: 'HG04 Control Surface' [kernel]  ──▶ client 129: 'Midi::In::HG04 Control Surface MIDI 1'
+```
+
+That client-129 port accepts writes, and Evil attributes events by *which of its
+own ports* they arrive on — so events we send there are indistinguishable from
+the real control surface, and the stock assignment file maps them for free:
+
+| Message | Assignment target |
+|---|---|
+| CC 3 | `JogOutput` → `/Engine/PushEncoderCtrl/Encoder` (turn) |
+| Note 4 | `PressAndHoldOutput` → `/Engine/PushEncoderCtrl/EncoderEnter` (push) |
+
+The port is located by **name**, since seq client numbers are assigned
+dynamically. `libasound` is `dlopen`ed, so the screen share still works if it's
+unavailable — only the encoder is lost.
+
+`JogOutput`'s relative-CC convention isn't documented in the firmware, and the
+common encodings disagree on how negative is represented, so `-j` selects it:
+`0` two's complement (default, −1 → 127), `1` signed bit (−1 → 65), `2` binary
+offset (0 → 64). If the knob turns the wrong way or does nothing, try the others.
 
 **Scheduling.** Pin to a core away from audio. On this device CPU0 services the
 I2S DMA IRQ plus ~20 Evil threads and CPU2 carries ~14 (the DSP pool), while CPU3

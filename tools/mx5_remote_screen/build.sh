@@ -14,7 +14,7 @@ OUT=${1:-$DIR/mx5_screen_server}
 CC=$(ls "$ROOT"/.toolchain/*/bin/arm-buildroot-linux-gnueabihf-gcc 2>/dev/null | head -1)
 [ -n "$CC" ] || { echo "ERROR: ARM toolchain not found in $ROOT/.toolchain -- see docker/Dockerfile" >&2; exit 1; }
 
-"$CC" -O2 -Wall -Wextra -Wno-unused-parameter -o "$OUT" "$DIR/mx5_screen_server.c"
+"$CC" -O2 -Wall -Wextra -Wno-unused-parameter -o "$OUT" "$DIR/mx5_screen_server.c" -ldl
 "$(dirname "$CC")"/arm-buildroot-linux-gnueabihf-strip "$OUT"
 
 echo "built: $OUT ($(wc -c < "$OUT") bytes)"

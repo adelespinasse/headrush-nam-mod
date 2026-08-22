@@ -168,6 +168,21 @@ def main():
     resyncs = 0
     stalls = 0
 
+    def send_encoder(delta):
+        # The physical knob is the control surface sending MIDI; the server
+        # injects the same MIDI into Evil's ALSA sequencer port, so this behaves
+        # exactly like turning the real knob.
+        try:
+            ser.write(struct.pack("<cb", b"E", delta))
+        except Exception as e:
+            print("encoder write failed:", e)
+
+    def send_encoder_press(down):
+        try:
+            ser.write(struct.pack("<cB", b"P", 1 if down else 0))
+        except Exception as e:
+            print("encoder write failed:", e)
+
     def send_touch(down, mx, my):
         # The panel is mounted rotated: framebuffer is portrait (w=480, h=800),
         # the physical screen is landscape (800x480). Display uses
@@ -196,6 +211,17 @@ def main():
             elif e.type == pygame.MOUSEBUTTONUP and e.button == 1:
                 dragging = False
                 send_touch(TOUCH_UP, *e.pos)
+            # Encoder: arrows turn it, space/enter presses it.
+            elif e.type == pygame.KEYDOWN:
+                if e.key in (pygame.K_UP, pygame.K_LEFT):
+                    send_encoder(-1)
+                elif e.key in (pygame.K_DOWN, pygame.K_RIGHT):
+                    send_encoder(1)
+                elif e.key in (pygame.K_SPACE, pygame.K_RETURN, pygame.K_KP_ENTER):
+                    send_encoder_press(True)
+            elif e.type == pygame.KEYUP:
+                if e.key in (pygame.K_SPACE, pygame.K_RETURN, pygame.K_KP_ENTER):
+                    send_encoder_press(False)
 
         # ---- one frame ----
         # Any malformed data means we've lost sync (dropped bytes, or we

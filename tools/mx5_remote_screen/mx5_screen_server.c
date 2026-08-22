@@ -38,6 +38,9 @@
  *
  * PROTOCOL (host -> device):
  *   'T' u8 down, u16 x, u16 y   -- 6 bytes; x,y in FRAMEBUFFER coords (480x800)
+ *   'E' i8 delta               -- 2 bytes; turn the encoder by `delta` clicks
+ *                                  (negative = left). Injected as MIDI, see below.
+ *   'P' u8 down                 -- 2 bytes; press/release the encoder knob.
  *   'K'                         -- 1 byte; request a full (keyframe) update and
  *                                  reset flow-control credit. Sent by a client
  *                                  on connect: a fresh client has no baseline to
@@ -55,6 +58,27 @@
  *
  * Touch is injected through /dev/uinput as an absolute multitouch device, so
  * it looks like the real ili2116 touchscreen to Qt.
+ *
+ * ENCODER EMULATION
+ * -----------------
+ * The encoder is NOT an input device -- it is the control-surface MCU sending
+ * MIDI over a serial link (snd-serdev-midi), which Evil consumes via the ALSA
+ * sequencer. So uinput cannot reach it; we have to become a MIDI source.
+ *
+ * Evil creates one ALSA seq client per MIDI device, e.g.
+ *     client 129: "Midi::In::HG04 Control Surface MIDI 1"  port 0  (-We-)
+ * subscribed from the hardware (client 20). That port accepts writes, and Evil
+ * attributes events by which of ITS ports they arrive on -- so events we send
+ * there are indistinguishable from the real control surface, and the stock
+ * assignment file (/usr/Evil/Assignments/HG04_Control_Surface_MIDI_1_
+ * Assignments.qml) maps them for free:
+ *     CC 3      -> JogOutput  -> /Engine/PushEncoderCtrl/Encoder     (turn)
+ *     Note 4    -> PressAndHold -> /Engine/PushEncoderCtrl/EncoderEnter (push)
+ * We locate the port by NAME rather than hardcoding 129, since client numbers
+ * are assigned dynamically.
+ *
+ * libasound is dlopen()ed, so the server still builds and runs (without encoder
+ * support) if it is missing.
  *
  * Scheduling: pin to a core away from audio. On this device CPU0 services the
  * I2S DMA IRQ (~4M interrupts) plus ~20 Evil threads, and CPU2 carries ~14
@@ -76,6 +100,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <dlfcn.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -228,6 +253,180 @@ static void touch(int down, int x, int y)
     ev(EV_SYN, SYN_REPORT, 0);
 }
 
+
+/* ---------- encoder injection via ALSA sequencer ---------- */
+/* libasound is loaded at runtime so this stays optional: if it is missing the
+ * screen share still works, only the encoder is unavailable. Types are opaque
+ * pointers here to avoid a build-time dependency on the ALSA headers. */
+static void *g_alsa;
+static void *g_seq;                 /* snd_seq_t*  */
+static int g_seq_port = -1;         /* our source port */
+static int g_dst_client = -1, g_dst_port = -1;
+
+static int (*p_open)(void **, const char *, int, int);
+static int (*p_set_name)(void *, const char *);
+static int (*p_create_simple_port)(void *, const char *, unsigned, unsigned);
+static int (*p_connect_to)(void *, int, int, int);
+static int (*p_event_output_direct)(void *, void *);
+static int (*p_drain_output)(void *);
+static int (*p_query_next_client)(void *, void *);
+static int (*p_query_next_port)(void *, void *);
+static int (*p_client_info_malloc)(void **);
+static int (*p_port_info_malloc)(void **);
+static void (*p_client_info_set_client)(void *, int);
+static void (*p_port_info_set_client)(void *, int);
+static void (*p_port_info_set_port)(void *, int);
+static int (*p_client_info_get_client)(void *);
+static int (*p_port_info_get_port)(void *);
+static const char *(*p_client_info_get_name)(void *);
+
+#define SND_SEQ_OPEN_OUTPUT 1
+#define SND_SEQ_PORT_CAP_READ 0x01
+#define SND_SEQ_PORT_CAP_SUBS_READ 0x20
+#define SND_SEQ_PORT_TYPE_MIDI_GENERIC 0x00000002
+#define SND_SEQ_PORT_TYPE_APPLICATION  0x00100000
+
+/* Minimal snd_seq_event_t layout (ALSA ABI, stable). We only fill the fields a
+ * direct-delivery MIDI event needs. */
+struct seq_addr { unsigned char client, port; };
+struct seq_ev_ctrl { unsigned char channel, unused[3]; unsigned int param; signed int value; };
+struct seq_ev_note { unsigned char channel, note, velocity, off_velocity; unsigned int duration; };
+struct seq_event {
+    unsigned char type, flags, tag, queue;
+    unsigned int tick_or_time[2];
+    struct seq_addr source, dest;
+    union { struct seq_ev_note note; struct seq_ev_ctrl ctrl; unsigned char raw[32]; } data;
+};
+#define SND_SEQ_EVENT_NOTEON      6
+#define SND_SEQ_EVENT_NOTEOFF     7
+#define SND_SEQ_EVENT_CONTROLLER  10
+#define SND_SEQ_TIME_STAMP_REAL   1
+#define SND_SEQ_TIME_MODE_REL     2
+#define SND_SEQ_QUEUE_DIRECT      253
+#define SND_SEQ_ADDRESS_SUBSCRIBERS 254
+
+static void *dl(const char *sym) { return dlsym(g_alsa, sym); }
+
+/* Find Evil's input port for the control surface by NAME (client numbers are
+ * assigned dynamically, so hardcoding 129 would be fragile). */
+static int find_evil_port(const char *want)
+{
+    void *cinfo = NULL, *pinfo = NULL;
+    if (p_client_info_malloc(&cinfo) < 0 || p_port_info_malloc(&pinfo) < 0) return -1;
+    p_client_info_set_client(cinfo, -1);
+    while (p_query_next_client(g_seq, cinfo) >= 0) {
+        int c = p_client_info_get_client(cinfo);
+        const char *name = p_client_info_get_name(cinfo);
+        if (!name || !strstr(name, want)) continue;
+        p_port_info_set_client(pinfo, c);
+        p_port_info_set_port(pinfo, -1);
+        if (p_query_next_port(g_seq, pinfo) >= 0) {
+            g_dst_client = c;
+            g_dst_port = p_port_info_get_port(pinfo);
+            fprintf(stderr, "encoder: found \"%s\" at %d:%d\n", name, g_dst_client, g_dst_port);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static void encoder_open(void)
+{
+    g_alsa = dlopen("libasound.so.2", RTLD_NOW);
+    if (!g_alsa) { fprintf(stderr, "encoder: libasound not available (%s) -- disabled\n", dlerror()); return; }
+    p_open                  = dl("snd_seq_open");
+    p_set_name              = dl("snd_seq_set_client_name");
+    p_create_simple_port    = dl("snd_seq_create_simple_port");
+    p_connect_to            = dl("snd_seq_connect_to");
+    p_event_output_direct   = dl("snd_seq_event_output_direct");
+    p_drain_output          = dl("snd_seq_drain_output");
+    p_query_next_client     = dl("snd_seq_query_next_client");
+    p_query_next_port       = dl("snd_seq_query_next_port");
+    p_client_info_malloc    = dl("snd_seq_client_info_malloc");
+    p_port_info_malloc      = dl("snd_seq_port_info_malloc");
+    p_client_info_set_client= dl("snd_seq_client_info_set_client");
+    p_port_info_set_client  = dl("snd_seq_port_info_set_client");
+    p_port_info_set_port    = dl("snd_seq_port_info_set_port");
+    p_client_info_get_client= dl("snd_seq_client_info_get_client");
+    p_port_info_get_port    = dl("snd_seq_port_info_get_port");
+    p_client_info_get_name  = dl("snd_seq_client_info_get_name");
+    if (!p_open || !p_create_simple_port || !p_event_output_direct || !p_query_next_client) {
+        fprintf(stderr, "encoder: libasound missing expected symbols -- disabled\n");
+        g_alsa = NULL; return;
+    }
+    if (p_open(&g_seq, "default", SND_SEQ_OPEN_OUTPUT, 0) < 0) {
+        fprintf(stderr, "encoder: snd_seq_open failed -- disabled\n"); g_seq = NULL; return;
+    }
+    p_set_name(g_seq, "mx5-remote-encoder");
+    g_seq_port = p_create_simple_port(g_seq, "out",
+                    SND_SEQ_PORT_CAP_READ | SND_SEQ_PORT_CAP_SUBS_READ,
+                    SND_SEQ_PORT_TYPE_MIDI_GENERIC | SND_SEQ_PORT_TYPE_APPLICATION);
+    if (g_seq_port < 0) { fprintf(stderr, "encoder: create_simple_port failed -- disabled\n"); g_seq = NULL; return; }
+    if (find_evil_port("Midi::In::HG04 Control Surface MIDI 1") < 0) {
+        fprintf(stderr, "encoder: Evil's control-surface input port not found -- disabled\n");
+        g_seq = NULL; return;
+    }
+    if (p_connect_to(g_seq, g_seq_port, g_dst_client, g_dst_port) < 0)
+        fprintf(stderr, "encoder: connect_to %d:%d failed (will send addressed instead)\n",
+                g_dst_client, g_dst_port);
+    fprintf(stderr, "encoder: ready\n");
+}
+
+static void seq_send(struct seq_event *e)
+{
+    if (!g_seq) return;
+    e->queue = SND_SEQ_QUEUE_DIRECT;
+    e->flags = SND_SEQ_TIME_STAMP_REAL | SND_SEQ_TIME_MODE_REL;
+    e->source.client = 0; e->source.port = (unsigned char)g_seq_port;
+    e->dest.client = (unsigned char)g_dst_client;
+    e->dest.port = (unsigned char)g_dst_port;
+    p_event_output_direct(g_seq, e);
+    if (p_drain_output) p_drain_output(g_seq);
+}
+
+/* Encoder turn. The stock assignment feeds CC 3 into a JogOutput, which expects
+ * a RELATIVE value -- but airAssignments' exact convention isn't documented in
+ * the firmware, and the three common ones disagree on how negative is encoded.
+ * Selectable with -j so it can be settled empirically without a rebuild:
+ *   0 two's complement (default): +1 -> 1,  -1 -> 127
+ *   1 signed bit:                 +1 -> 1,  -1 -> 65
+ *   2 binary offset (64 = zero):  +1 -> 65, -1 -> 63
+ * If the knob turns the wrong way, jumps, or does nothing, try the others. */
+static int g_jog_mode = 0;
+
+static void encoder_turn(int delta)
+{
+    int steps = delta < 0 ? -delta : delta;
+    int neg = delta < 0;
+    if (steps > 16) steps = 16;
+    for (int i = 0; i < steps; i++) {
+        int v;
+        switch (g_jog_mode) {
+            case 1:  v = neg ? 65 : 1;  break;
+            case 2:  v = neg ? 63 : 65; break;
+            default: v = neg ? 127 : 1; break;
+        }
+        struct seq_event e; memset(&e, 0, sizeof e);
+        e.type = SND_SEQ_EVENT_CONTROLLER;
+        e.data.ctrl.channel = 0;
+        e.data.ctrl.param = 3;                       /* CC 3 */
+        e.data.ctrl.value = v;
+        seq_send(&e);
+    }
+}
+
+/* Encoder push: note 4 on/off, which the stock assignment routes through
+ * PressAndHoldOutput to EncoderEnter (+ EncoderTimer for long press). */
+static void encoder_press(int down)
+{
+    struct seq_event e; memset(&e, 0, sizeof e);
+    e.type = down ? SND_SEQ_EVENT_NOTEON : SND_SEQ_EVENT_NOTEOFF;
+    e.data.note.channel = 0;
+    e.data.note.note = 4;
+    e.data.note.velocity = down ? 127 : 0;
+    seq_send(&e);
+}
+
 /* ---------- output ---------- */
 
 static int write_all(const void *buf, size_t n)
@@ -354,6 +553,18 @@ static void handle_input(void)
     while (i < have) {
         if (buf[i] == 'K') { g_want_key = 1; g_credit = MAX_CREDIT; i++; continue; }
         if (buf[i] == 'A') { if (g_credit < MAX_CREDIT) g_credit++; i++; continue; }
+        if (buf[i] == 'E') {
+            if (have - i < 2) break;
+            encoder_turn((signed char)buf[i + 1]);
+            i += 2;
+            continue;
+        }
+        if (buf[i] == 'P') {
+            if (have - i < 2) break;
+            encoder_press(buf[i + 1]);
+            i += 2;
+            continue;
+        }
         if (buf[i] == 'T') {
             if (have - i < 6) break;            /* wait for the rest */
             int down = buf[i + 1];
@@ -377,6 +588,7 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-f") && i + 1 < argc) fbdev = argv[++i];
         else if (!strcmp(argv[i], "-r") && i + 1 < argc) fps = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-j") && i + 1 < argc) g_jog_mode = atoi(argv[++i]);
         else {
             fprintf(stderr,
                 "usage: %s [-f /dev/fb0] [-r fps]\n"
@@ -401,6 +613,7 @@ int main(int argc, char **argv)
 
     fb_open(fbdev);
     ui_open();
+    encoder_open();
 
     long period_ns = 1000000000L / fps;
     struct timespec next, last_key;
