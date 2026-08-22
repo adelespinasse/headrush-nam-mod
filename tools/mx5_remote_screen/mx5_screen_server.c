@@ -99,6 +99,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <dlfcn.h>
 #include <termios.h>
@@ -132,6 +133,32 @@ static void die(const char *msg)
 {
     fprintf(stderr, "mx5_screen_server: %s: %s\n", msg, strerror(errno));
     exit(1);
+}
+
+/* Refuse to run twice. Two instances both hold /dev/ttyGS1 open and RACE on
+ * reads: each input message goes to whichever process reads it first, so a
+ * touch DOWN can land in one and the UP in the other -- the first never sees a
+ * release and the contact sticks down (a tap becomes a long press), while other
+ * taps are split so neither sees a complete one. Their frame writes interleave
+ * too. The symptoms look like protocol corruption and are miserable to
+ * diagnose, so fail loudly instead.
+ *
+ * This is easy to do by accident: the installed service has Restart=always, so
+ * killing it just brings it back five seconds later, next to the copy you
+ * started by hand. Use `systemctl stop mx5-screen` first. */
+static void single_instance(void)
+{
+    static int lock_fd = -1;
+    lock_fd = open("/tmp/mx5_screen_server.lock", O_RDWR | O_CREAT, 0600);
+    if (lock_fd < 0) return;                       /* can't lock: don't block startup */
+    if (flock(lock_fd, LOCK_EX | LOCK_NB) < 0) {
+        fprintf(stderr,
+            "mx5_screen_server: another instance is already running.\n"
+            "  If it is the installed service:  systemctl stop mx5-screen\n"
+            "  Then kill any manual copy:       killall mx5_screen_server\n"
+            "  (note: the service restarts itself, so kill alone is not enough)\n");
+        exit(1);
+    }
 }
 
 /* ---------- framebuffer ---------- */
@@ -651,6 +678,7 @@ int main(int argc, char **argv)
         }
     }
 
+    single_instance();
     fb_open(fbdev);
     ui_open();
     encoder_open();

@@ -60,15 +60,35 @@ systemd knows nothing about it.
 
 ### By hand (for iterating)
 
-Paste the deploy blob into the root shell (see below), then:
+**Stop the installed service first.** It has `Restart=always`, so `kill` alone
+brings it back five seconds later — and you end up with *two* servers. Busybox
+has no `pkill`; use `killall`:
+
+```sh
+systemctl stop mx5-screen        # also prevents the restart
+killall mx5_screen_server        # any manual copy
+```
+
+Two servers is not a harmless waste. Both hold `/dev/ttyGS1` open and **race on
+reads**: each input message goes to whichever process reads it first, so a touch
+DOWN can land in one and the UP in the other. The first never sees a release, so
+the contact sticks down and a tap behaves like a long press; other taps get split
+so neither server sees a complete one and the click does nothing. Their frame
+writes interleave too, which looks like protocol corruption. The server now takes
+an exclusive `flock` and refuses to start twice rather than let this happen
+silently, because the symptoms point everywhere except the actual cause.
+
+Then paste the deploy blob into the root shell (see below) and:
 
 ```sh
 taskset -c 3 /tmp/mx5_screen_server -r 15 <> /dev/ttyGS1 >&0 2>/tmp/srv.log &
 ```
 
 `<> /dev/ttyGS1 >&0` opens the port read-write as both stdin and stdout, so
-frames go out and touch events come back on the same channel. Kill it with
-`pkill -f mx5_screen_server` before shutting down, for the reason above.
+frames go out and touch events come back on the same channel. Add `-v` to trace
+input (each touch DOWN/UP with coordinates and inter-event timing, and encoder
+turns/presses) into the log. Stop it with `killall mx5_screen_server` before
+shutting down, for the reason above.
 
 ## Building and deploying
 
