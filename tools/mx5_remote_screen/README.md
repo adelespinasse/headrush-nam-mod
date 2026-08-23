@@ -68,6 +68,7 @@ Left-click to tap; click-drag to swipe.
 | Input | Action |
 |---|---|
 | Mouse wheel | Encoder knob (scroll down = clockwise) |
+| Wheel click (middle button) | Press the knob |
 | Up / Down arrow | Encoder knob, one click counter-clockwise / clockwise |
 | Enter | Press the knob (held while held) |
 | Left / Right arrow | Real arrow keys — move the text cursor when naming |

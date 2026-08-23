@@ -40,7 +40,7 @@
   <span id="stat">not connected</span>
   <span id="err"></span>
 </div>
-<div id="hint">click/drag = touch &middot; wheel or up/down arrows = encoder &middot; enter = press it &middot; left/right arrows and typing go to the device</div>
+<div id="hint">click/drag = touch &middot; wheel or up/down arrows = encoder &middot; wheel-click or enter = press it &middot; left/right arrows and typing go to the device</div>
 <canvas id="screen" width="800" height="480"></canvas>
 
 <script>
@@ -313,7 +313,18 @@ const KEYCODE = {
 const ENCODER_KEY = { ArrowUp: -1, ArrowDown: 1 };
 const KNOB_PRESS_KEY = "Enter";
 
-let knobDown = false;
+/* The knob is one physical control with two ways to press it -- Enter and the
+ * wheel button -- so track them separately and drive the device from whether
+ * EITHER is held. Sharing a single flag would make releasing one release the
+ * knob while the other was still down. */
+let knobDown = false, knobKeyDown = false, knobMouseDown = false;
+
+function updateKnob() {
+  const want = knobKeyDown || knobMouseDown;
+  if (want === knobDown) return;
+  knobDown = want;
+  sendEncoderPress(want);
+}
 
 window.addEventListener("keydown", e => {
   if (!writer) return;
@@ -323,7 +334,8 @@ window.addEventListener("keydown", e => {
   if (turn) { sendEncoder(turn); e.preventDefault(); return; }
 
   if (e.key === KNOB_PRESS_KEY) {
-    if (!knobDown) { knobDown = true; sendEncoderPress(true); }
+    knobKeyDown = true;
+    updateKnob();
     e.preventDefault();
     return;
   }
@@ -334,9 +346,9 @@ window.addEventListener("keydown", e => {
 
 window.addEventListener("keyup", e => {
   if (!writer) return;
-  if (e.key === KNOB_PRESS_KEY && knobDown) {
-    knobDown = false;
-    sendEncoderPress(false);
+  if (e.key === KNOB_PRESS_KEY) {
+    knobKeyDown = false;
+    updateKnob();
     e.preventDefault();
     return;
   }
@@ -351,7 +363,8 @@ window.addEventListener("keyup", e => {
 window.addEventListener("blur", () => {
   if (!writer) return;
   for (const c of [...keysDown]) sendKey(c, false);
-  if (knobDown) { knobDown = false; sendEncoderPress(false); }
+  knobKeyDown = knobMouseDown = false;
+  updateKnob();
 });
 
 /* Mouse wheel turns the encoder. Deltas are normalised to notches before being
@@ -372,9 +385,32 @@ screenEl.addEventListener("wheel", e => {
   sendEncoder(Math.max(-8, Math.min(8, steps)));   // cap a flung trackpad
 }, { passive: false });                   // passive listeners can't preventDefault
 
-screenEl.addEventListener("mousedown", e => { dragging = true; sendTouch(true, e); });
+/* Button 0 is the touchscreen; button 1 (the wheel) presses the encoder, which
+ * is how the knob behaves on the hardware. Restricting touch to button 0 also
+ * fixes middle-click previously injecting a tap. */
+screenEl.addEventListener("mousedown", e => {
+  if (e.button === 1) {
+    knobMouseDown = true;
+    updateKnob();
+    e.preventDefault();      // suppress the browser's middle-click autoscroll
+    return;
+  }
+  if (e.button !== 0) return;
+  dragging = true;
+  sendTouch(true, e);
+});
+
 screenEl.addEventListener("mousemove", e => { if (dragging) sendTouch(true, e); });
-window.addEventListener("mouseup", e => { if (dragging) { dragging = false; sendTouch(false, e); } });
+
+window.addEventListener("mouseup", e => {
+  if (e.button === 1) { knobMouseDown = false; updateKnob(); return; }
+  if (e.button !== 0) return;
+  if (dragging) { dragging = false; sendTouch(false, e); }
+});
+
+// Middle-click also raises auxclick, which can still trigger autoscroll on some
+// platforms even after mousedown was defaulted away.
+screenEl.addEventListener("auxclick", e => { if (e.button === 1) e.preventDefault(); });
 
 /* ---------------- connection ---------------- */
 
