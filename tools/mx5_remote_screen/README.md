@@ -87,6 +87,27 @@ advertises. As with touch, every held key is released on exit — a Shift left
 down would corrupt input from the real UI. *Encoder keys are the browser
 viewer only; the Python viewer predates this.*
 
+**Evil blacklists three keyboard nodes.** inMusic patched Qt's keyboard manager
+so that a keyboard at `/dev/input/event2`, `event3` or `event4` is silently
+refused: those paths are hardcoded in `qevdevkeyboardmanager.cpp`'s string pool
+beside a `"Not adding keyboard at %ls"` message that stock Qt does not contain.
+Only keyboards are filtered — our touchscreen on `event2` works fine.
+
+This cost a while to find, because every layer looked healthy: the key reached
+uinput, the device appeared in `/proc/bus/input/devices` with `kbd` attached and
+the right capability bits, and Evil simply never opened it. Setting
+`QT_QPA_EVDEV_KEYBOARD_PARAMETERS=/dev/input/event3` with
+`QT_LOGGING_RULES='qt.qpa.input*=true'` is what made Evil say why:
+
+```
+qt.qpa.input: Not adding keyboard at /dev/input/event3
+```
+
+Since a node number can't be requested, the server burns the bad ones: it
+creates a keyboard, asks via `UI_GET_SYSNAME` which node it got, and if that node
+is blacklisted keeps it open as padding — so the number stays taken — and tries
+again. `srv.log` reports the node finally used.
+
 **Idle cost is negligible**: the server holds no flow-control credit until a
 viewer asks for a frame, and it never reads the framebuffer without credit — it
 just wakes briefly to check for a client. It is also `Nice=10` and pinned to

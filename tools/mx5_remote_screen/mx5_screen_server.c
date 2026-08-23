@@ -99,6 +99,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <dirent.h>
 #include <signal.h>
 #include <sys/file.h>
 #include <sys/mman.h>
@@ -224,31 +225,92 @@ static int g_verbose = 0;
 static int kb_fd = -1;
 static unsigned char kb_held[KEY_MAX + 1];
 
-static void kb_open(void)
+/* Which /dev/input/eventN a device lands on decides whether Evil will look at
+ * it. inMusic patched Qt's keyboard manager with a hardcoded blacklist --
+ * "/dev/input/event2", "/dev/input/event3" and "/dev/input/event4" sit in
+ * qevdevkeyboardmanager.cpp's string pool next to a "Not adding keyboard at
+ * %ls" message that stock Qt does not have. Presumably those nodes are
+ * something they did not want grabbed as a keyboard on the real hardware.
+ *
+ * Confirmed on device: passing QT_QPA_EVDEV_KEYBOARD_PARAMETERS=/dev/input/event3
+ * logs exactly "Not adding keyboard at /dev/input/event3" -- the manager runs,
+ * sees our device and refuses it. Touch is unaffected; only keyboards are
+ * filtered, which is why our touchscreen works on event2.
+ *
+ * So place the keyboard outside that range. We cannot choose a node number, but
+ * we can burn the bad ones: create a device, ask which node it got, and if it is
+ * blacklisted keep it open as padding (so the number stays taken) and try again.
+ * Three attempts is the worst case. */
+static int kb_blacklisted(int n) { return n >= 2 && n <= 4; }
+
+#define KB_PAD_MAX 8
+static int kb_pads[KB_PAD_MAX];
+static int kb_npads = 0;
+
+/* Node number the kernel gave a freshly created uinput device, or -1. */
+static int uinput_event_number(int fd)
+{
+    char sys[64], path[160];
+    struct dirent *e;
+    DIR *dir;
+    int n = -1;
+
+    if (ioctl(fd, UI_GET_SYSNAME(sizeof sys), sys) < 0) return -1;
+    snprintf(path, sizeof path, "/sys/devices/virtual/input/%s", sys);
+    if (!(dir = opendir(path))) return -1;
+    while ((e = readdir(dir)))
+        if (!strncmp(e->d_name, "event", 5)) { n = atoi(e->d_name + 5); break; }
+    closedir(dir);
+    return n;
+}
+
+static int kb_create(void)
 {
     struct uinput_setup us;
+    int fd = open("/dev/uinput", O_WRONLY);
+    if (fd < 0) { perror("open /dev/uinput (keyboard disabled)"); return -1; }
 
-    kb_fd = open("/dev/uinput", O_WRONLY);
-    if (kb_fd < 0) { perror("open /dev/uinput (keyboard disabled)"); return; }
-
-    ioctl(kb_fd, UI_SET_EVBIT, EV_KEY);
-    ioctl(kb_fd, UI_SET_EVBIT, EV_SYN);
+    ioctl(fd, UI_SET_EVBIT, EV_KEY);
+    ioctl(fd, UI_SET_EVBIT, EV_SYN);
     /* Advertise the whole ordinary keymap: the viewer decides what to send, so
-     * the server needs no per-key policy. */
+     * the server needs no per-key policy. Setting every key bit here is also
+     * what makes udev tag the node ID_INPUT_KEYBOARD, which Qt's discovery
+     * requires. */
     for (int k = KEY_ESC; k <= KEY_COMPOSE; k++)
-        ioctl(kb_fd, UI_SET_KEYBIT, k);
+        ioctl(fd, UI_SET_KEYBIT, k);
 
     memset(&us, 0, sizeof us);
     us.id.bustype = BUS_VIRTUAL;
     us.id.vendor  = 0x0763;
     us.id.product = 0x5019;
     snprintf(us.name, sizeof us.name, "mx5-remote-keyboard");
-    if (ioctl(kb_fd, UI_DEV_SETUP, &us) < 0) perror("UI_DEV_SETUP (kbd)");
-    if (ioctl(kb_fd, UI_DEV_CREATE) < 0) {
+    if (ioctl(fd, UI_DEV_SETUP, &us) < 0) perror("UI_DEV_SETUP (kbd)");
+    if (ioctl(fd, UI_DEV_CREATE) < 0) {
         perror("UI_DEV_CREATE (keyboard disabled)");
-        close(kb_fd); kb_fd = -1; return;
+        close(fd);
+        return -1;
     }
-    fprintf(stderr, "uinput: virtual keyboard created\n");
+    return fd;
+}
+
+static void kb_open(void)
+{
+    while (kb_npads < KB_PAD_MAX) {
+        int fd = kb_create();
+        int n;
+        if (fd < 0) return;
+
+        n = uinput_event_number(fd);
+        if (n < 0 || !kb_blacklisted(n)) {
+            kb_fd = fd;
+            fprintf(stderr, "uinput: virtual keyboard created (event%d)\n", n);
+            return;
+        }
+        /* Hold it open: closing would free the number and we would get it back. */
+        fprintf(stderr, "uinput: event%d is on Evil's keyboard blacklist, retrying\n", n);
+        kb_pads[kb_npads++] = fd;
+    }
+    fprintf(stderr, "uinput: could not get a usable keyboard node (keyboard disabled)\n");
 }
 
 static void kb_key(int code, int down)
