@@ -262,8 +262,9 @@ function sendTouch(down, ev) {
    the server injects the same MIDI into Evil's ALSA sequencer port -- so these
    behave exactly like turning/pressing the real knob.
      arrows up/left  -> one click counter-clockwise
-     arrows down/right -> one click clockwise
-     space / enter   -> press the knob (held while the key is held) */
+     arrows down       -> one click clockwise
+     enter             -> press the knob (held while the key is held)
+     everything else   -> injected as a real key (see KEYCODE below) */
 function sendEncoder(delta) {
   if (!writer) return;
   writer.write(new Uint8Array([0x45, delta & 0xff])).catch(e => setError("encoder: " + e.message));
@@ -272,26 +273,79 @@ function sendEncoderPress(down) {
   if (!writer) return;
   writer.write(new Uint8Array([0x50, down ? 1 : 0])).catch(e => setError("encoder: " + e.message));
 }
+function sendKey(code, down) {
+  if (!writer) return;
+  writer.write(new Uint8Array([0x42, code & 0xff, (code >> 8) & 0xff, down ? 1 : 0]))
+        .catch(e => setError("key: " + e.message));
+}
+
+/* Linux input codes, keyed by KeyboardEvent.code so the mapping is physical and
+ * layout-independent. The table lives here rather than on the device: the
+ * server just injects what it is told, so adding keys needs no reflash. */
+const KEYCODE = {
+  Escape:1, Digit1:2, Digit2:3, Digit3:4, Digit4:5, Digit5:6, Digit6:7,
+  Digit7:8, Digit8:9, Digit9:10, Digit0:11, Minus:12, Equal:13, Backspace:14,
+  Tab:15, KeyQ:16, KeyW:17, KeyE:18, KeyR:19, KeyT:20, KeyY:21, KeyU:22,
+  KeyI:23, KeyO:24, KeyP:25, BracketLeft:26, BracketRight:27, Enter:28,
+  ControlLeft:29, KeyA:30, KeyS:31, KeyD:32, KeyF:33, KeyG:34, KeyH:35,
+  KeyJ:36, KeyK:37, KeyL:38, Semicolon:39, Quote:40, Backquote:41,
+  ShiftLeft:42, Backslash:43, KeyZ:44, KeyX:45, KeyC:46, KeyV:47, KeyB:48,
+  KeyN:49, KeyM:50, Comma:51, Period:52, Slash:53, ShiftRight:54,
+  AltLeft:56, Space:57, CapsLock:58,
+  NumpadEnter:96, ControlRight:97, AltRight:100,
+  Home:102, PageUp:104, ArrowLeft:105, ArrowRight:106, End:107,
+  PageDown:109, Insert:110, Delete:111,
+};
+
+/* Arrow keys are split deliberately. Up/Down drive the encoder, because that is
+ * what the knob does nearly everywhere in the UI. Left/Right are sent as real
+ * arrow keys instead: in the naming dialogs they move the text cursor, and on
+ * every other screen the knob only selects Cancel/Save, which Up/Down already
+ * covers. Mapping them to knob turns would make text editing impossible for no
+ * gain elsewhere.
+ *
+ * Space types a space -- rig names contain them -- so Enter alone is the knob
+ * press. Enter is also what the naming dialog's onAccepted handler wants, so it
+ * confirms in both contexts. */
+const ENCODER_KEY = { ArrowUp: -1, ArrowDown: 1 };
+const KNOB_PRESS_KEY = "Enter";
 
 let knobDown = false;
+
 window.addEventListener("keydown", e => {
   if (!writer) return;
-  switch (e.key) {
-    case "ArrowUp": case "ArrowLeft":    sendEncoder(-1); break;
-    case "ArrowDown": case "ArrowRight": sendEncoder(1);  break;
-    case " ": case "Enter":
-      if (!knobDown) { knobDown = true; sendEncoderPress(true); }
-      break;
-    default: return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;   // leave browser shortcuts alone
+
+  const turn = ENCODER_KEY[e.key];
+  if (turn) { sendEncoder(turn); e.preventDefault(); return; }
+
+  if (e.key === KNOB_PRESS_KEY) {
+    if (!knobDown) { knobDown = true; sendEncoderPress(true); }
+    e.preventDefault();
+    return;
   }
-  e.preventDefault();          // don't scroll the page with arrows/space
+
+  const code = KEYCODE[e.code];
+  if (code) { sendKey(code, true); e.preventDefault(); }
 });
+
 window.addEventListener("keyup", e => {
-  if ((e.key === " " || e.key === "Enter") && knobDown) {
+  if (!writer) return;
+  if (e.key === KNOB_PRESS_KEY && knobDown) {
     knobDown = false;
     sendEncoderPress(false);
     e.preventDefault();
+    return;
   }
+  const code = KEYCODE[e.code];
+  if (code) { sendKey(code, false); e.preventDefault(); }
+});
+
+// Any key still held when focus leaves would otherwise stay down on the device.
+window.addEventListener("blur", () => {
+  if (!writer) return;
+  for (const c of Object.values(KEYCODE)) sendKey(c, false);
+  if (knobDown) { knobDown = false; sendEncoderPress(false); }
 });
 
 screenEl.addEventListener("mousedown", e => { dragging = true; sendTouch(true, e); });

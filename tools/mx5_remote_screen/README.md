@@ -63,9 +63,29 @@ pip install pyserial pygame
 python mx5_viewer.py COM7            # or /dev/ttyACM1 on Linux/macOS
 ```
 
-Left-click to tap; click-drag to swipe. **Arrow keys turn the encoder knob**
-(up/left = counter-clockwise, down/right = clockwise) and **space/enter presses
-it**. Both viewers support this.
+Left-click to tap; click-drag to swipe.
+
+| Key | Action |
+|---|---|
+| Up / Down arrow | Encoder knob, one click counter-clockwise / clockwise |
+| Enter | Press the knob (held while held) |
+| Left / Right arrow | Real arrow keys — move the text cursor when naming |
+| Letters, digits, punctuation, space, backspace, delete, home/end | Typed into the device |
+
+The arrow split is deliberate. Up/Down drive the knob because that is what it
+does nearly everywhere; Left/Right are sent as real keys because in the naming
+dialogs they move the text cursor, and elsewhere the knob only picks
+Cancel/Save, which Up/Down already covers. Space types a space (rig names
+contain them), so Enter alone is the knob press — which suits the naming dialog
+too, since its `onAccepted` handler confirms on Enter.
+
+Typing works because the naming dialog is a real Qt Quick Controls `TextField`
+with `focus: true`, not a grid of tappable buttons, so it consumes ordinary key
+events. The server exposes a **second** uinput device for this rather than
+adding a keymap to the touch device, since Qt classifies a device by what it
+advertises. As with touch, every held key is released on exit — a Shift left
+down would corrupt input from the real UI. *Encoder keys are the browser
+viewer only; the Python viewer predates this.*
 
 **Idle cost is negligible**: the server holds no flow-control credit until a
 viewer asks for a frame, and it never reads the framebuffer without credit — it

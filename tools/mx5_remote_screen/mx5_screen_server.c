@@ -209,6 +209,70 @@ static const uint8_t *fb_visible(void)
 
 /* ---------- uinput touch injection ---------- */
 
+/* Separate uinput device for the keyboard.
+ *
+ * The rig/set-list naming dialog is a real Qt Quick Controls TextField with
+ * focus:true and an onAccepted handler -- not a grid of tappable buttons -- so
+ * it consumes ordinary Qt key events and a virtual keyboard reaches it the same
+ * way our virtual touchscreen reaches the rest of the UI.
+ *
+ * It is a distinct device rather than more capabilities on the touch device
+ * because Qt classifies a device by what it advertises, and a single node
+ * claiming both absolute multitouch and a full keymap invites it to be
+ * misclassified as one or the other. */
+static int g_verbose = 0;
+static int kb_fd = -1;
+static unsigned char kb_held[KEY_MAX + 1];
+
+static void kb_open(void)
+{
+    struct uinput_setup us;
+
+    kb_fd = open("/dev/uinput", O_WRONLY);
+    if (kb_fd < 0) { perror("open /dev/uinput (keyboard disabled)"); return; }
+
+    ioctl(kb_fd, UI_SET_EVBIT, EV_KEY);
+    ioctl(kb_fd, UI_SET_EVBIT, EV_SYN);
+    /* Advertise the whole ordinary keymap: the viewer decides what to send, so
+     * the server needs no per-key policy. */
+    for (int k = KEY_ESC; k <= KEY_COMPOSE; k++)
+        ioctl(kb_fd, UI_SET_KEYBIT, k);
+
+    memset(&us, 0, sizeof us);
+    us.id.bustype = BUS_VIRTUAL;
+    us.id.vendor  = 0x0763;
+    us.id.product = 0x5019;
+    snprintf(us.name, sizeof us.name, "mx5-remote-keyboard");
+    if (ioctl(kb_fd, UI_DEV_SETUP, &us) < 0) perror("UI_DEV_SETUP (kbd)");
+    if (ioctl(kb_fd, UI_DEV_CREATE) < 0) {
+        perror("UI_DEV_CREATE (keyboard disabled)");
+        close(kb_fd); kb_fd = -1; return;
+    }
+    fprintf(stderr, "uinput: virtual keyboard created\n");
+}
+
+static void kb_key(int code, int down)
+{
+    struct input_event e[2];
+    if (kb_fd < 0 || code <= 0 || code > KEY_MAX) return;
+    if (g_verbose) fprintf(stderr, "key %d %s\n", code, down ? "down" : "up");
+
+    memset(e, 0, sizeof e);
+    e[0].type = EV_KEY; e[0].code = code; e[0].value = down ? 1 : 0;
+    e[1].type = EV_SYN; e[1].code = SYN_REPORT;
+    if (write(kb_fd, e, sizeof e) != (ssize_t)sizeof e)
+        fprintf(stderr, "uinput: DROPPED key %d (%s)\n", code, strerror(errno));
+    kb_held[code] = down ? 1 : 0;
+}
+
+/* Same hazard as a stuck touch contact, and worse for a modifier: a Shift left
+ * down would corrupt every subsequent keystroke from the real UI. */
+static void kb_release_all(void)
+{
+    for (int k = 0; k <= KEY_MAX; k++)
+        if (kb_held[k]) kb_key(k, 0);
+}
+
 static void ui_open(void)
 {
     struct uinput_setup us;
@@ -251,8 +315,6 @@ static void ui_open(void)
         close(ui_fd); ui_fd = -1; return; }
     fprintf(stderr, "uinput: virtual touchscreen created (%ux%u)\n", g_w, g_h);
 }
-
-static int g_verbose = 0;
 
 static void ev(int type, int code, int val)
 {
@@ -318,6 +380,7 @@ static void release_touch_on_exit(void)
 {
     if (g_touch_down) touch(0, 0, 0);
     if (g_encoder_down) encoder_press(0);
+    kb_release_all();
 }
 
 static void on_signal(int sig)
@@ -664,6 +727,13 @@ static void handle_input(void)
             i += 6;
             continue;
         }
+        if (buf[i] == 'B') {                    /* keyboard: code + down */
+            if (have - i < 4) break;
+            int code = buf[i + 1] | (buf[i + 2] << 8);
+            kb_key(code, buf[i + 3]);
+            i += 4;
+            continue;
+        }
         i++;                                    /* skip noise */
     }
     if (i && i < have) memmove(buf, buf + i, have - i);
@@ -705,6 +775,7 @@ int main(int argc, char **argv)
     single_instance();
     fb_open(fbdev);
     ui_open();
+    kb_open();
     atexit(release_touch_on_exit);
     signal(SIGTERM, on_signal);
     signal(SIGINT,  on_signal);
