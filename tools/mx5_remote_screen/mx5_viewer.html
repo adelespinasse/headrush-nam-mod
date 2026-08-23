@@ -40,7 +40,7 @@
   <span id="stat">not connected</span>
   <span id="err"></span>
 </div>
-<div id="hint">encoder: arrows turn &middot; space/enter presses</div>
+<div id="hint">click/drag = touch &middot; wheel or up/down arrows = encoder &middot; enter = press it &middot; left/right arrows and typing go to the device</div>
 <canvas id="screen" width="800" height="480"></canvas>
 
 <script>
@@ -353,6 +353,24 @@ window.addEventListener("blur", () => {
   for (const c of [...keysDown]) sendKey(c, false);
   if (knobDown) { knobDown = false; sendEncoderPress(false); }
 });
+
+/* Mouse wheel turns the encoder. Deltas are normalised to notches before being
+ * accumulated because the unit depends on deltaMode -- roughly 100 per notch in
+ * pixel mode, 3 in line mode, 1 in page mode -- and a precision trackpad emits a
+ * stream of small ones. Sending a step per event would spin the knob wildly on
+ * a trackpad and unevenly across browsers. */
+const WHEEL_UNIT = { 0: 100, 1: 3, 2: 1 };
+let wheelAccum = 0;
+
+screenEl.addEventListener("wheel", e => {
+  if (!writer) return;
+  e.preventDefault();                     // don't scroll the page with the mirror
+  wheelAccum += e.deltaY / (WHEEL_UNIT[e.deltaMode] || 100);
+  const steps = Math.trunc(wheelAccum);   // scroll down = clockwise, as with ArrowDown
+  if (!steps) return;
+  wheelAccum -= steps;
+  sendEncoder(Math.max(-8, Math.min(8, steps)));   // cap a flung trackpad
+}, { passive: false });                   // passive listeners can't preventDefault
 
 screenEl.addEventListener("mousedown", e => { dragging = true; sendTouch(true, e); });
 screenEl.addEventListener("mousemove", e => { if (dragging) sendTouch(true, e); });

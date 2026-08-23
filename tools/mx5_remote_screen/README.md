@@ -65,12 +65,19 @@ python mx5_viewer.py COM7            # or /dev/ttyACM1 on Linux/macOS
 
 Left-click to tap; click-drag to swipe.
 
-| Key | Action |
+| Input | Action |
 |---|---|
+| Mouse wheel | Encoder knob (scroll down = clockwise) |
 | Up / Down arrow | Encoder knob, one click counter-clockwise / clockwise |
 | Enter | Press the knob (held while held) |
 | Left / Right arrow | Real arrow keys — move the text cursor when naming |
 | Letters, digits, punctuation, space, backspace, delete, home/end | Typed into the device |
+
+Wheel deltas are normalised to notches and accumulated before a step is sent:
+the unit depends on `deltaMode` (about 100 per notch in pixel mode, 3 in line
+mode, 1 in page mode) and a precision trackpad emits a stream of small ones, so
+sending a step per event would spin the knob wildly on a trackpad and unevenly
+across browsers.
 
 The arrow split is deliberate. Up/Down drive the knob because that is what it
 does nearly everywhere; Left/Right are sent as real keys because in the naming
