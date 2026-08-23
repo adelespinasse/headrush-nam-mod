@@ -273,8 +273,11 @@ function sendEncoderPress(down) {
   if (!writer) return;
   writer.write(new Uint8Array([0x50, down ? 1 : 0])).catch(e => setError("encoder: " + e.message));
 }
+const keysDown = new Set();
+
 function sendKey(code, down) {
   if (!writer) return;
+  if (down) keysDown.add(code); else keysDown.delete(code);
   writer.write(new Uint8Array([0x42, code & 0xff, (code >> 8) & 0xff, down ? 1 : 0]))
         .catch(e => setError("key: " + e.message));
 }
@@ -341,10 +344,13 @@ window.addEventListener("keyup", e => {
   if (code) { sendKey(code, false); e.preventDefault(); }
 });
 
-// Any key still held when focus leaves would otherwise stay down on the device.
+// A key held when focus leaves never delivers its keyup, so release what we
+// actually sent down -- and only that. Releasing the whole table instead
+// floods the device log with dozens of no-op events every time the window
+// loses focus, which buries the events worth reading.
 window.addEventListener("blur", () => {
   if (!writer) return;
-  for (const c of Object.values(KEYCODE)) sendKey(c, false);
+  for (const c of [...keysDown]) sendKey(c, false);
   if (knobDown) { knobDown = false; sendEncoderPress(false); }
 });
 
